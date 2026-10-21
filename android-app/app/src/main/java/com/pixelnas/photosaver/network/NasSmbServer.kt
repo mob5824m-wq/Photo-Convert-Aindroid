@@ -972,7 +972,7 @@ class NasSmbServer(
                     leBuffer(4 + nameBytes.size) { putInt(nameBytes.size); put(nameBytes) }
                 }
                 22 -> {
-                    val streamName = "::$DATA".toByteArray(Charsets.UTF_16LE)
+                    val streamName = "::\$DATA".toByteArray(Charsets.UTF_16LE)
                     if (h.isDir) ByteArray(0) else leBuffer(24 + streamName.size) {
                         putInt(0); putInt(streamName.size); putLong(eof); putLong(alloc); put(streamName)
                     }
