@@ -4,6 +4,7 @@
     android:initialLayout="@layout/widget_household_samba"
     android:minWidth="250dp"
     android:minHeight="110dp"
+    android:previewImage="@drawable/brand_logo"
     android:resizeMode="horizontal|vertical"
     android:updatePeriodMillis="1800000"
     android:widgetCategory="home_screen" />

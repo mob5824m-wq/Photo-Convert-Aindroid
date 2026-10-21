@@ -72,7 +72,7 @@ jobs:
         run: |
           echo "${{ steps.ver.outputs.version }}" > VERSION
           mkdir -p android-app/app/src/main/assets/webui
-          cp webui/index.html webui/styles.css webui/app.js android-app/app/src/main/assets/webui/
+          cp -r webui/. android-app/app/src/main/assets/webui/
 
       - name: Verify Persistent V1+V2 Release Keystore
         run: |

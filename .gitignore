@@ -6,12 +6,17 @@ __pycache__/
 runtime_data/
 *.db
 *.sqlite3
+Unselected files/
 
 # Android / Gradle build outputs
 android-app/.gradle/
 android-app/build/
 android-app/app/build/
 android-app/local.properties
+household-app/.gradle/
+household-app/build/
+household-app/app/build/
+household-app/local.properties
 *.apk
 *.aab
 *.jks

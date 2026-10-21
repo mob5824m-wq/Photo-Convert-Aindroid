@@ -3,24 +3,33 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#1a73e8" />
   <title>Pixel Photo NAS — Android Unlimited Google Photos Relay</title>
+  <link rel="icon" type="image/png" href="/favicon.png" />
+  <link rel="manifest" href="/manifest.json" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">
-        <div class="brand-logo" aria-hidden="true">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="3" width="20" height="8" rx="2"></rect>
-            <rect x="2" y="13" width="20" height="8" rx="2"></rect>
-            <line x1="6" y1="7" x2="6.01" y2="7"></line>
-            <line x1="6" y1="17" x2="6.01" y2="17"></line>
-          </svg>
-        </div>
-        <div>
+        <img
+          src="/app-icon.png"
+          alt="Pixel Photo NAS App Icon"
+          class="brand-app-icon"
+          width="46"
+          height="46"
+        />
+        <img
+          src="/logo.png"
+          alt="Pixel Photo NAS — Home Photo &amp; Samba Server"
+          class="brand-wordmark"
+          width="210"
+          height="70"
+        />
+        <div class="brand-meta">
           <div class="brand-title-row">
-            <h1 class="brand-title">Pixel Photo NAS</h1>
+            <h1 class="brand-title sr-only">Pixel Photo NAS</h1>
             <span class="status-pill" id="engineStatusPill">
               <span class="status-dot"></span>
               <span id="engineStatusText">Online · Watching</span>
