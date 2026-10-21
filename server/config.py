@@ -15,19 +15,34 @@ from typing import Dict, List
 DEFAULT_FOLDER_PROFILES: List[Dict] = [
     {
         "name": "StorageSaver",
+        "folder_name": "StorageSaver",
         "mode": "storage_saver",
+        "storage_saver_enabled": True,
+        "max_megapixels": 16.0,
+        "jpeg_quality": 85,
+        "compress_videos": True,
         "output_subfolder": "",
         "description": "Shrinks >16 MP photos to 16 MP JPEG (85%) & >1080p video to 1080p MP4, deletes full-res originals.",
     },
     {
         "name": "Original",
+        "folder_name": "Original",
         "mode": "original_passthrough",
+        "storage_saver_enabled": False,
+        "max_megapixels": 16.0,
+        "jpeg_quality": 95,
+        "compress_videos": False,
         "output_subfolder": "",
         "description": "Keeps 100% full-resolution originals untouched in Output and removes staging copies.",
     },
     {
         "name": "Family",
+        "folder_name": "Family",
         "mode": "storage_saver",
+        "storage_saver_enabled": True,
+        "max_megapixels": 16.0,
+        "jpeg_quality": 85,
+        "compress_videos": True,
         "output_subfolder": "Family",
         "description": "Converts to Storage Saver and saves into dedicated Output/Family device folder.",
     },
@@ -154,6 +169,27 @@ class NasSettings:
 
     def sanitized_dict(self) -> dict:
         data = asdict(self)
+        norm_profiles = []
+        for p in data.get("folder_profiles") or []:
+            fn = p.get("folder_name") or p.get("name") or ""
+            is_saver = (
+                bool(p["storage_saver_enabled"])
+                if "storage_saver_enabled" in p
+                else (p.get("mode") != "original_passthrough")
+            )
+            norm_profiles.append(
+                {
+                    **p,
+                    "name": fn,
+                    "folder_name": fn,
+                    "mode": "storage_saver" if is_saver else "original_passthrough",
+                    "storage_saver_enabled": is_saver,
+                    "max_megapixels": float(p.get("max_megapixels", 16.0)),
+                    "jpeg_quality": int(p.get("jpeg_quality", 85)),
+                    "compress_videos": bool(p.get("compress_videos", is_saver)),
+                }
+            )
+        data["folder_profiles"] = norm_profiles
         data["profile_details"] = PIXEL_PROFILES.get(
             self.device_profile, PIXEL_PROFILES["pixel_5"]
         )
@@ -164,7 +200,8 @@ class NasSettings:
         if not needle:
             return None
         for prof in self.folder_profiles:
-            if str(prof.get("name", "")).strip().lower() == needle:
+            cand = str(prof.get("folder_name") or prof.get("name") or "").strip().lower()
+            if cand == needle:
                 return prof
         return None
 
@@ -289,34 +326,38 @@ class SettingsManager:
                     for item in value:
                         if not isinstance(item, dict):
                             continue
-                        nm = sanitize_folder_segment(str(item.get("name", "")))
+                        nm = sanitize_folder_segment(
+                            str(item.get("folder_name") or item.get("name") or "")
+                        )
                         if not nm or nm.lower() in seen_names:
                             continue
                         seen_names.add(nm.lower())
-                        mode = (
-                            "original_passthrough"
-                            if item.get("mode") == "original_passthrough"
-                            else "storage_saver"
-                        )
+                        if "storage_saver_enabled" in item:
+                            is_saver = bool(item.get("storage_saver_enabled"))
+                        else:
+                            is_saver = item.get("mode") != "original_passthrough"
+                        mode = "storage_saver" if is_saver else "original_passthrough"
                         out_sub = sanitize_folder_segment(
                             str(item.get("output_subfolder", ""))
                         )
                         desc = str(item.get("description", "")).strip() or (
-                            f"{'Original Quality' if mode == 'original_passthrough' else 'Storage Saver (≤16 MP)'}"
+                            f"{'Original Quality' if not is_saver else 'Storage Saver (≤16 MP)'}"
                             + (f" → Output/{out_sub}" if out_sub else " → Output")
                         )
                         normalized.append(
                             {
                                 "name": nm,
+                                "folder_name": nm,
                                 "mode": mode,
+                                "storage_saver_enabled": is_saver,
+                                "max_megapixels": float(item.get("max_megapixels", 16.0)),
+                                "jpeg_quality": int(item.get("jpeg_quality", 85)),
+                                "compress_videos": bool(item.get("compress_videos", is_saver)),
                                 "output_subfolder": out_sub,
                                 "description": desc,
                             }
                         )
-                    if normalized:
-                        value = normalized
-                    else:
-                        continue
+                    value = normalized
                 elif key == "device_profile":
                     if str(value) not in PIXEL_PROFILES:
                         continue

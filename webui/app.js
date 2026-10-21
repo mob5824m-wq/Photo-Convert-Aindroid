@@ -185,11 +185,16 @@
       `<option value="">Global Default (/Incoming)</option>` +
       profiles
         .map((p) => {
-          const modeTxt = p.storage_saver_enabled
+          const fname = p.folder_name || p.name || "";
+          const isSaver =
+            typeof p.storage_saver_enabled === "boolean"
+              ? p.storage_saver_enabled
+              : p.mode !== "original_passthrough";
+          const modeTxt = isSaver
             ? `≤${p.max_megapixels || 16} MP Saver`
             : "100% Original";
           const subTxt = p.output_subfolder ? ` → Output/${p.output_subfolder}` : "";
-          return `<option value="${escapeHtml(p.folder_name)}">${escapeHtml(p.folder_name)} (/Incoming/${escapeHtml(p.folder_name)} · ${modeTxt}${escapeHtml(subTxt)})</option>`;
+          return `<option value="${escapeHtml(fname)}">${escapeHtml(fname)} (/Incoming/${escapeHtml(fname)} · ${modeTxt}${escapeHtml(subTxt)})</option>`;
         })
         .join("");
     if (Array.from(sel.options).some((o) => o.value === prevVal)) {
@@ -203,7 +208,12 @@
     }
     listEl.innerHTML = profiles
       .map((p, idx) => {
-        const badge = p.storage_saver_enabled
+        const fname = p.folder_name || p.name || "";
+        const isSaver =
+          typeof p.storage_saver_enabled === "boolean"
+            ? p.storage_saver_enabled
+            : p.mode !== "original_passthrough";
+        const badge = isSaver
           ? `<span class="badge badge-accent">Storage Saver ≤${p.max_megapixels || 16} MP</span>`
           : `<span class="badge badge-success">Original 100%</span>`;
         const dest = p.output_subfolder
@@ -212,12 +222,12 @@
         return `
           <div class="profile-rule-card">
             <div class="profile-rule-top">
-              <span class="profile-rule-path">/Incoming/${escapeHtml(p.folder_name)}/</span>
+              <span class="profile-rule-path">/Incoming/${escapeHtml(fname)}/</span>
               ${badge}
             </div>
             <div class="profile-rule-desc">
               Routes to <code>${dest}</code>
-              ${p.compress_videos ? " · 1080p Video" : " · Direct Video"}
+              ${p.compress_videos !== false && isSaver ? " · 1080p Video" : " · Direct Video"}
             </div>
             <div>
               <button type="button" class="btn btn-ghost btn-sm remove-profile-btn" data-profile-idx="${idx}">Remove Rule</button>
