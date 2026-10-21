@@ -59,6 +59,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.pixelnas.photosaver.util.PixelDeviceDetector
+import com.pixelnas.photosaver.widget.PixelNasUploadWidgetProvider
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
@@ -77,6 +78,9 @@ fun MainScreen(
 
     var oledShieldActive by remember { mutableStateOf(false) }
     var pixelShiftStep by remember { mutableIntStateOf(0) }
+    var newRuleFolder by remember { mutableStateOf("") }
+    var newRuleOutSub by remember { mutableStateOf("") }
+    var newRuleSaver by remember { mutableStateOf(true) }
 
     LaunchedEffect(oledShieldActive) {
         while (oledShieldActive) {
@@ -86,10 +90,9 @@ fun MainScreen(
     }
 
     val webPortalUrl = "http://${telemetry.lanIp}:${cfg.httpPort}"
-    val webDavUrl = "$webPortalUrl/webdav/Incoming/"
-    val ftpUrl = "ftp://${telemetry.lanIp}:${cfg.ftpPort}/"
+    val webDavUrl = "$webPortalUrl/webdav/Incoming/StorageSaver/"
+    val ftpUrl = "ftp://${telemetry.lanIp}:${cfg.ftpPort}/Incoming/"
 
-    // True #000000 OLED Burn-In Blackout Mode for 24/7 desk/closet Pixel 2 XL / 3 / 4 / 5 OLED panels
     if (oledShieldActive) {
         val dy = ((pixelShiftStep - 2) * 28).dp
         Box(
@@ -198,7 +201,7 @@ fun MainScreen(
                             )
                             Spacer(Modifier.height(4.dp))
                             Text(
-                                "Grant storage access so Pixel Photo NAS can convert high-res uploads in Folder 1, move them into DCIM/PixelNAS for Google Photos, and delete originals.",
+                                "Grant storage access so Pixel Photo NAS can convert high-res uploads in Folder 1, move them into DCIM/PixelNAS for Google Photos, and clean up originals.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
@@ -211,6 +214,7 @@ fun MainScreen(
                 }
             }
 
+            // Card 1: NAS Daemon Status & LAN Endpoints
             item {
                 ElevatedCard(shape = RoundedCornerShape(16.dp)) {
                     Column(Modifier.padding(16.dp)) {
@@ -242,15 +246,15 @@ fun MainScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Image(
                                 bitmap = qrBitmap,
-                                contentDescription = "Scan to open Web Portal",
+                                contentDescription = "Scan from your daily Android phone",
                                 modifier = Modifier.size(96.dp)
                             )
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
-                                Text("Browser Portal", style = MaterialTheme.typography.labelMedium)
+                                Text("Browser Portal & Widget API", style = MaterialTheme.typography.labelMedium)
                                 Text(webPortalUrl, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Spacer(Modifier.height(4.dp))
-                                Text("WebDAV Drive", style = MaterialTheme.typography.labelMedium)
+                                Text("WebDAV Saver Folder", style = MaterialTheme.typography.labelMedium)
                                 Text(webDavUrl, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Spacer(Modifier.height(4.dp))
                                 Text("FTP Server", style = MaterialTheme.typography.labelMedium)
@@ -277,6 +281,65 @@ fun MainScreen(
                 }
             }
 
+            // Card 2: Native Android Home Screen Upload Widget & Companion Phone Setup
+            item {
+                ElevatedCard(shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "Android Home Screen Upload Widget",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "Pin the 1-tap Upload Widget (Saver ≤16MP · Original · Family) to your Android Home Screen or use Android Share Sheet. Leave URL blank for local mode, or point your daily Android phone at your closet Pixel NAS!",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = cfg.remoteNasUrl,
+                            onValueChange = { url -> viewModel.updateConfig { it.copy(remoteNasUrl = url) } },
+                            label = { Text("Closet Pixel Wi-Fi URL (blank = Local Device)") },
+                            placeholder = { Text("e.g. http://192.168.1.50:8080") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = {
+                                    val pinned = PixelNasUploadWidgetProvider.requestPinWidget(context)
+                                    if (!pinned) {
+                                        Toast.makeText(
+                                            context,
+                                            "Long-press Home Screen → Widgets → Pixel Photo NAS",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
+                            ) {
+                                Text("Pin Widget to Home Screen")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.autoDiscoverRemoteNas { found ->
+                                        Toast.makeText(
+                                            context,
+                                            found?.let { "Found Pixel NAS at $it" }
+                                                ?: "No remote Pixel NAS found on Wi-Fi",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                }
+                            ) {
+                                Text("Auto-Find NAS")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Card 3: Conversion & Cleanup Pipeline Controls
             item {
                 ElevatedCard(shape = RoundedCornerShape(16.dp)) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -286,13 +349,13 @@ fun MainScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            "Folder 1 (${telemetry.incomingCount} waiting)  →  ${if (cfg.storageSaverEnabled) "≤${cfg.maxMegapixels.roundToInt()} MP Saver" else "Original Pass-Through"}  →  Folder 2 (${telemetry.outputCount} ready · ${formatBytes(summary.totalSavedBytes)} saved)",
+                            "Folder 1 (${telemetry.incomingCount} waiting)  →  ${cfg.folderProfiles.size} Profiles  →  Folder 2 (${telemetry.outputCount} ready · ${formatBytes(summary.totalSavedBytes)} saved)",
                             style = MaterialTheme.typography.bodyMedium
                         )
 
                         ToggleSettingRow(
-                            title = "Convert to Storage Saver Quality",
-                            subtitle = "Shrink photos >16 MP to 16 MP JPEG (${cfg.jpegQuality}%) preserving EXIF Date & GPS",
+                            title = "Global Default: Storage Saver Quality",
+                            subtitle = "Shrink photos >16 MP to 16 MP JPEG (${cfg.jpegQuality}%) keeping EXIF Date & GPS",
                             checked = cfg.storageSaverEnabled,
                             onCheckedChange = { enabled ->
                                 viewModel.updateConfig { it.copy(storageSaverEnabled = enabled) }
@@ -301,7 +364,7 @@ fun MainScreen(
 
                         ToggleSettingRow(
                             title = "Delete Higher-Res Originals",
-                            subtitle = "Automatically remove source files & sidecar JSONs from Folder 1 once verified",
+                            subtitle = "Remove source files & sidecar JSONs from Folder 1 once output is verified",
                             checked = cfg.deleteOriginals,
                             onCheckedChange = { enabled ->
                                 viewModel.updateConfig { it.copy(deleteOriginals = enabled) }
@@ -319,7 +382,7 @@ fun MainScreen(
 
                         ToggleSettingRow(
                             title = "Smart EXIF Repair + Takeout JSON + SHA-256 Dedup",
-                            subtitle = "Rebuilds WhatsApp/Screenshot EXIF dates, merges Google Takeout .json GPS/dates & skips duplicates",
+                            subtitle = "Rebuilds WhatsApp/Android EXIF dates, merges Takeout .json GPS/dates & skips duplicates",
                             checked = cfg.restoreExifFromFilename && cfg.mergeTakeoutJson,
                             onCheckedChange = { enabled ->
                                 viewModel.updateConfig {
@@ -333,6 +396,15 @@ fun MainScreen(
                         )
 
                         ToggleSettingRow(
+                            title = "Quarantine Corrupted Transfers",
+                            subtitle = "Isolate unreadable files into PixelNAS/Quarantine (.nomedia) after ${cfg.quarantineMaxRetries} retries",
+                            checked = cfg.quarantineEnabled,
+                            onCheckedChange = { enabled ->
+                                viewModel.updateConfig { it.copy(quarantineEnabled = enabled) }
+                            }
+                        )
+
+                        ToggleSettingRow(
                             title = "Auto-Start NAS on Pixel Boot",
                             subtitle = "Keeps headless closet server alive automatically after power restarts",
                             checked = cfg.startOnBoot,
@@ -342,7 +414,7 @@ fun MainScreen(
                         )
 
                         Text(
-                            "Auto-Clean Synced Output Retention (Frees local storage after Google Photos sync)",
+                            "Auto-Clean Synced Output Retention",
                             style = MaterialTheme.typography.labelLarge
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -372,13 +444,123 @@ fun MainScreen(
                                 Text("Convert Now")
                             }
                             OutlinedButton(onClick = { viewModel.dropSamplePhotos() }) {
-                                Text("Test Sample 24MP")
+                                Text("Test Android Profiles")
                             }
                         }
                     }
                 }
             }
 
+            // Card 4: Per-Folder Profiles Manager
+            item {
+                ElevatedCard(shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "Per-Folder Profiles (/Incoming/<Folder>/)",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        cfg.folderProfiles.forEach { rule ->
+                            Card(shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            "/Incoming/${rule.folderName}/",
+                                            fontFamily = FontFamily.Monospace,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        val destTxt = if (rule.outputSubfolder.isNotBlank()) {
+                                            "DCIM/PixelNAS/${rule.outputSubfolder}"
+                                        } else {
+                                            "DCIM/PixelNAS"
+                                        }
+                                        Text(
+                                            "${if (rule.storageSaverEnabled) "≤16 MP Saver" else "100% Original"} → $destTxt",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    OutlinedButton(onClick = { viewModel.removeFolderProfile(rule.folderName) }) {
+                                        Text("Remove")
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider()
+                        OutlinedTextField(
+                            value = newRuleFolder,
+                            onValueChange = { newRuleFolder = it },
+                            label = { Text("New Subfolder Name (e.g. Partner, Kids, Trip2026)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = newRuleOutSub,
+                            onValueChange = { newRuleOutSub = it },
+                            label = { Text("Output Subfolder (optional, e.g. Family)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            FilterChip(
+                                selected = newRuleSaver,
+                                onClick = { newRuleSaver = true },
+                                label = { Text("Storage Saver ≤16MP") }
+                            )
+                            FilterChip(
+                                selected = !newRuleSaver,
+                                onClick = { newRuleSaver = false },
+                                label = { Text("Original 100%") }
+                            )
+                            Button(
+                                onClick = {
+                                    viewModel.addFolderProfile(newRuleFolder, newRuleSaver, newRuleOutSub)
+                                    newRuleFolder = ""
+                                    newRuleOutSub = ""
+                                }
+                            ) {
+                                Text("+ Add")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Card 5: Quarantine Folder Card
+            item {
+                ElevatedCard(shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "Quarantine Folder (${telemetry.quarantineCount} isolated)",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "Corrupted or incomplete transfers are automatically moved out of Incoming into ${cfg.quarantineDir} (.nomedia shielded) after ${cfg.quarantineMaxRetries} retries.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { viewModel.retryAllQuarantine() }) {
+                                Text("Retry All")
+                            }
+                            OutlinedButton(onClick = { viewModel.simulateCorruptedUpload() }) {
+                                Text("Test Corrupt File")
+                            }
+                            OutlinedButton(onClick = { viewModel.clearQuarantine() }) {
+                                Text("Clear")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Card 6: Folder Paths
             item {
                 ElevatedCard(shape = RoundedCornerShape(16.dp)) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -429,10 +611,11 @@ fun MainScreen(
             items(history.take(15)) { rec ->
                 Card(shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
-                        Text(rec.outputFilename.ifBlank { rec.originalFilename }, fontWeight = FontWeight.SemiBold)
+                        val profPrefix = if (rec.profileName != "default") "[${rec.profileName}] " else ""
+                        Text("$profPrefix${rec.outputFilename.ifBlank { rec.originalFilename }}", fontWeight = FontWeight.SemiBold)
                         val noteSuffix = if (rec.metadataNote.isNotBlank()) " · ${rec.metadataNote}" else ""
                         Text(
-                            "${rec.origWidth}×${rec.origHeight} (${formatBytes(rec.origBytes)}) → ${rec.outWidth}×${rec.outHeight} (${formatBytes(rec.outBytes)}) · -${rec.savedPct}% ${if (rec.originalDeleted) "· High-Res Deleted ✓" else ""}$noteSuffix",
+                            "${rec.origWidth}×${rec.origHeight} (${formatBytes(rec.origBytes)}) → ${rec.outWidth}×${rec.outHeight} (${formatBytes(rec.outBytes)}) · -${rec.savedPct}% ${if (rec.originalDeleted) "· Cleaned ✓" else ""}$noteSuffix",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

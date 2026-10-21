@@ -19,10 +19,11 @@ logger = logging.getLogger("pixelnas.ftp")
 
 class PixelVirtualFTPFS(AbstractedFS):
     """
-     Android FUSE-safe virtual FTP filesystem (no OS symlinks required):
-      /            -> lists virtual folders ['Incoming', 'Output'] (uploads directly to '/' also route to Incoming!)
-      /Incoming/*  -> mapped directly to `settings_mgr.incoming_dir`
-      /Output/*    -> mapped directly to `settings_mgr.output_dir`
+    Android FUSE-safe virtual FTP filesystem (no OS symlinks required):
+      /              -> lists virtual folders ['Incoming', 'Output', 'Quarantine']
+      /Incoming/*    -> mapped directly to `settings_mgr.incoming_dir` (includes StorageSaver/, Original/, Family/)
+      /Output/*      -> mapped directly to `settings_mgr.output_dir`
+      /Quarantine/*  -> mapped directly to `settings_mgr.quarantine_dir`
     """
 
     settings_mgr: Optional[SettingsManager] = None
@@ -32,6 +33,7 @@ class PixelVirtualFTPFS(AbstractedFS):
         if not self.settings_mgr:
             return super().ftp2fs(ftppath)
         inc_dir, out_dir = self.settings_mgr.ensure_directories()
+        quar_dir = self.settings_mgr.quarantine_path()
         stripped = norm.lstrip("/")
         if not stripped:
             return str(self.root)
@@ -44,7 +46,10 @@ class PixelVirtualFTPFS(AbstractedFS):
         if head in ("output", "googlephotos_output"):
             target = (out_dir / tail).resolve() if tail else out_dir
             return str(target) if str(target).startswith(str(out_dir)) else str(out_dir)
-        # Allow DSLR / quick FTP clients uploading directly to '/' root to land straight in Incoming
+        if head == "quarantine":
+            target = (quar_dir / tail).resolve() if tail else quar_dir
+            return str(target) if str(target).startswith(str(quar_dir)) else str(quar_dir)
+        # Allow quick FTP clients uploading directly to '/' root to land straight in Incoming
         target = (inc_dir / stripped).resolve()
         return str(target) if str(target).startswith(str(inc_dir)) else str(inc_dir)
 
@@ -53,6 +58,7 @@ class PixelVirtualFTPFS(AbstractedFS):
             return super().fs2ftp(fspath)
         resolved = str(Path(fspath).resolve())
         inc_dir, out_dir = self.settings_mgr.ensure_directories()
+        quar_dir = self.settings_mgr.quarantine_path()
         if resolved == str(Path(self.root).resolve()):
             return "/"
         if resolved == str(inc_dir):
@@ -63,6 +69,10 @@ class PixelVirtualFTPFS(AbstractedFS):
             return "/Output"
         if resolved.startswith(str(out_dir) + "/"):
             return "/Output/" + resolved[len(str(out_dir)) + 1 :]
+        if resolved == str(quar_dir):
+            return "/Quarantine"
+        if resolved.startswith(str(quar_dir) + "/"):
+            return "/Quarantine/" + resolved[len(str(quar_dir)) + 1 :]
         return "/"
 
     def validpath(self, path: str) -> bool:
@@ -70,10 +80,12 @@ class PixelVirtualFTPFS(AbstractedFS):
             return super().validpath(path)
         resolved = str(Path(path).resolve())
         inc_dir, out_dir = self.settings_mgr.ensure_directories()
+        quar_dir = self.settings_mgr.quarantine_path()
         allowed_roots = (
             str(Path(self.root).resolve()),
             str(inc_dir),
             str(out_dir),
+            str(quar_dir),
         )
         return any(
             resolved == r or resolved.startswith(r + "/") for r in allowed_roots
@@ -81,7 +93,7 @@ class PixelVirtualFTPFS(AbstractedFS):
 
     def listdir(self, path: str):
         if Path(path).resolve() == Path(self.root).resolve():
-            return ["Incoming", "Output"]
+            return ["Incoming", "Output", "Quarantine"]
         return [name for name in super().listdir(path) if not name.startswith(".")]
 
 
@@ -153,7 +165,7 @@ class EmbeddedFtpServer:
                 },
             )
             handler.authorizer = authorizer
-            handler.banner = "Pixel Photo NAS FTP Ready (/Incoming & /Output)"
+            handler.banner = "Pixel Photo NAS FTP Ready (/Incoming, /Output, /Quarantine)"
             handler.passive_ports = range(50000, 50030)
 
             try:

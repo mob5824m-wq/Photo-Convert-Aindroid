@@ -48,13 +48,8 @@ def _check_auth(request: Request, settings_mgr: SettingsManager) -> bool:
 def _resolve_dav_path(
     rel_path: str, settings_mgr: SettingsManager
 ) -> Tuple[str, Optional[Path]]:
-    """
-    Virtual WebDAV root:
-      /                  -> virtual root containing Incoming/ and Output/
-      /Incoming/<...>    -> mapped to settings.incoming_dir/<...>
-      /Output/<...>      -> mapped to settings.output_dir/<...>
-    """
     inc_dir, out_dir = settings_mgr.ensure_directories()
+    quar_dir = settings_mgr.quarantine_path()
     cleaned = unquote(rel_path).strip("/")
     if not cleaned:
         return "root", None
@@ -66,15 +61,15 @@ def _resolve_dav_path(
     if share == "incoming":
         base = inc_dir
         target = (base.joinpath(*sub)).resolve() if sub else base
-        if not str(target).startswith(str(base)):
-            return "forbidden", None
-        return "incoming", target
+        return ("incoming", target) if str(target).startswith(str(base)) else ("forbidden", None)
     if share in ("output", "googlephotos_output"):
         base = out_dir
         target = (base.joinpath(*sub)).resolve() if sub else base
-        if not str(target).startswith(str(base)):
-            return "forbidden", None
-        return "output", target
+        return ("output", target) if str(target).startswith(str(base)) else ("forbidden", None)
+    if share == "quarantine":
+        base = quar_dir
+        target = (base.joinpath(*sub)).resolve() if sub else base
+        return ("quarantine", target) if str(target).startswith(str(base)) else ("forbidden", None)
     return "not_found", None
 
 
@@ -151,21 +146,15 @@ def create_webdav_router(
                 multistatus.append(_build_prop_xml("/webdav/", "PixelPhotoNAS", True))
                 if depth != "0":
                     inc_dir, out_dir = settings_mgr.ensure_directories()
+                    quar_dir = settings_mgr.quarantine_path()
                     multistatus.append(
-                        _build_prop_xml(
-                            "/webdav/Incoming/",
-                            "Incoming",
-                            True,
-                            mtime=inc_dir.stat().st_mtime,
-                        )
+                        _build_prop_xml("/webdav/Incoming/", "Incoming", True, mtime=inc_dir.stat().st_mtime)
                     )
                     multistatus.append(
-                        _build_prop_xml(
-                            "/webdav/Output/",
-                            "Output",
-                            True,
-                            mtime=out_dir.stat().st_mtime,
-                        )
+                        _build_prop_xml("/webdav/Output/", "Output", True, mtime=out_dir.stat().st_mtime)
+                    )
+                    multistatus.append(
+                        _build_prop_xml("/webdav/Quarantine/", "Quarantine", True, mtime=quar_dir.stat().st_mtime)
                     )
             elif fs_path is not None and fs_path.exists():
                 norm_href = "/webdav/" + "/".join(
@@ -258,7 +247,8 @@ def create_webdav_router(
             if not fs_path.exists():
                 return Response(status_code=404, headers=common_headers)
             inc_dir, out_dir = settings_mgr.ensure_directories()
-            if fs_path in (inc_dir, out_dir):
+            quar_dir = settings_mgr.quarantine_path()
+            if fs_path in (inc_dir, out_dir, quar_dir):
                 return Response(status_code=403, headers=common_headers)
             if fs_path.is_dir():
                 shutil.rmtree(fs_path)

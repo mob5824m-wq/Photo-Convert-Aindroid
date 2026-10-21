@@ -78,8 +78,8 @@ jobs:
       - name: Prepare Named Installable APKs
         run: |
           mkdir -p dist-apk
-          cp android-app/app/build/outputs/apk/release/app-release.apk dist-apk/PixelPhotoNAS-v1.1.0-Pixel1to5-Signed.apk
-          cp android-app/app/build/outputs/apk/debug/app-debug.apk dist-apk/PixelPhotoNAS-v1.1.0-Debug.apk
+          cp android-app/app/build/outputs/apk/release/app-release.apk dist-apk/PixelPhotoNAS-v1.2.0-Pixel1to5-Signed.apk
+          cp android-app/app/build/outputs/apk/debug/app-debug.apk dist-apk/PixelPhotoNAS-v1.2.0-Debug.apk
           INFO=$(ls -lh dist-apk/ | tr '\n' ' ')
           echo "::notice title=Built Signed APKs::$INFO"
 

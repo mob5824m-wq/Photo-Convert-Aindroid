@@ -9,10 +9,10 @@ android {
 
     defaultConfig {
         applicationId = "com.pixelnas.photosaver"
-        minSdk = 26 // Android 8.0 Oreo -> supports Google Pixel 1, 2, 3, 3a, 4, 4a, 4a 5G, and Pixel 5
+        minSdk = 26 // Android 8.0 Oreo -> supports Google Pixel 1, 2, 3, 3a, 4, 4a, 4a 5G, Pixel 5 & daily Android phones
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
 
         vectorDrawables {
             useSupportLibrary = true

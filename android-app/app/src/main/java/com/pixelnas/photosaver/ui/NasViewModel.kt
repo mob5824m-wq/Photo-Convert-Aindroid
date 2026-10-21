@@ -9,12 +9,15 @@ import androidx.lifecycle.viewModelScope
 import com.pixelnas.photosaver.PixelNasApp
 import com.pixelnas.photosaver.converter.StorageSaverConverter
 import com.pixelnas.photosaver.model.ConversionRecord
+import com.pixelnas.photosaver.model.FolderProfileRule
 import com.pixelnas.photosaver.model.HistorySummary
 import com.pixelnas.photosaver.model.NasConfig
 import com.pixelnas.photosaver.model.PixelHardwareInfo
 import com.pixelnas.photosaver.model.WorkerRuntimeState
 import com.pixelnas.photosaver.service.PixelNasService
 import com.pixelnas.photosaver.util.PixelDeviceDetector
+import com.pixelnas.photosaver.widget.PixelNasUploadWidgetProvider
+import com.pixelnas.photosaver.widget.WidgetUploadActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,11 +25,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.io.File
 
 data class StorageTelemetry(
     val incomingCount: Int = 0,
     val outputCount: Int = 0,
+    val quarantineCount: Int = 0,
     val freeBytes: Long = 0L,
     val totalBytes: Long = 0L,
     val hasAllFilesAccess: Boolean = true,
@@ -59,8 +62,10 @@ class NasViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshTelemetry() {
         val (incDir, outDir) = app.preferences.ensureFolders()
-        val incCount = incDir.listFiles()?.count { it.isFile && !it.name.startsWith(".") } ?: 0
-        val outCount = outDir.listFiles()?.count { it.isFile && !it.name.startsWith(".") } ?: 0
+        val quarDir = app.preferences.quarantineFolder()
+        val incCount = app.watcher.listIncomingFiles(incDir, app.preferences.current.recursiveSubfolders).size
+        val outCount = app.watcher.listOutputFiles(outDir).size
+        val quarCount = quarDir.listFiles()?.count { it.isFile && !it.name.startsWith(".") } ?: 0
         val stat = try {
             StatFs(outDir.absolutePath)
         } catch (_: Exception) {
@@ -74,6 +79,7 @@ class NasViewModel(application: Application) : AndroidViewModel(application) {
         _telemetry.value = StorageTelemetry(
             incomingCount = incCount,
             outputCount = outCount,
+            quarantineCount = quarCount,
             freeBytes = stat?.availableBytes ?: 0L,
             totalBytes = stat?.totalBytes ?: 0L,
             hasAllFilesAccess = allAccess,
@@ -94,10 +100,46 @@ class NasViewModel(application: Application) : AndroidViewModel(application) {
     fun updateConfig(transform: (NasConfig) -> NasConfig) {
         val updated = app.preferences.update(transform)
         app.ftpServer.startOrReload()
+        PixelNasUploadWidgetProvider.refreshAllWidgets(app)
         if (updated.autoWatchEnabled) {
             app.watcher.processAllNow()
         }
         refreshTelemetry()
+    }
+
+    fun addFolderProfile(folderName: String, storageSaver: Boolean, outputSubfolder: String) {
+        val cleanName = folderName.trim().replace(Regex("[^A-Za-z0-9._-]"), "")
+        if (cleanName.isBlank()) return
+        val cleanOut = outputSubfolder.trim().replace(Regex("[^A-Za-z0-9._/-]"), "").trim('/')
+        updateConfig { cfg ->
+            val filtered = cfg.folderProfiles.filterNot { it.folderName.equals(cleanName, ignoreCase = true) }
+            cfg.copy(
+                folderProfiles = filtered + FolderProfileRule(
+                    folderName = cleanName,
+                    storageSaverEnabled = storageSaver,
+                    maxMegapixels = 16.0,
+                    jpegQuality = 85,
+                    compressVideos = storageSaver,
+                    outputSubfolder = cleanOut
+                )
+            )
+        }
+    }
+
+    fun removeFolderProfile(folderName: String) {
+        updateConfig { cfg ->
+            cfg.copy(folderProfiles = cfg.folderProfiles.filterNot { it.folderName == folderName })
+        }
+    }
+
+    fun autoDiscoverRemoteNas(onResult: (String?) -> Unit) {
+        viewModelScope.launch {
+            val found = WidgetUploadActivity.discoverNasOnLan(app)
+            if (found != null) {
+                updateConfig { it.copy(remoteNasUrl = found) }
+            }
+            onResult(found)
+        }
     }
 
     fun processIncomingNow() {
@@ -118,10 +160,39 @@ class NasViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun simulateCorruptedUpload() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val (incDir, _) = app.preferences.ensureFolders()
+            StorageSaverConverter.seedCorruptedTransfer(incDir)
+            if (app.preferences.current.autoWatchEnabled) {
+                app.watcher.processAllNow()
+            }
+            refreshTelemetry()
+        }
+    }
+
+    fun retryAllQuarantine() {
+        viewModelScope.launch(Dispatchers.IO) {
+            app.watcher.retryAllQuarantine()
+            refreshTelemetry()
+        }
+    }
+
+    fun clearQuarantine() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val quarDir = app.preferences.quarantineFolder()
+            quarDir.listFiles()?.forEach {
+                if (it.isFile && !it.name.startsWith(".")) it.delete()
+            }
+            app.historyStore.clearQuarantineMeta()
+            refreshTelemetry()
+        }
+    }
+
     fun clearSyncedOutput() {
         viewModelScope.launch(Dispatchers.IO) {
             val (_, outDir) = app.preferences.ensureFolders()
-            outDir.listFiles()?.forEach {
+            outDir.walkTopDown().forEach {
                 if (it.isFile && !it.name.startsWith(".")) it.delete()
             }
             refreshTelemetry()

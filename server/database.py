@@ -28,6 +28,7 @@ class HistoryDatabase:
                     output_filename TEXT NOT NULL,
                     media_type TEXT NOT NULL,
                     mode TEXT NOT NULL,
+                    profile_name TEXT DEFAULT '',
                     orig_width INTEGER DEFAULT 0,
                     orig_height INTEGER DEFAULT 0,
                     orig_mp REAL DEFAULT 0.0,
@@ -51,7 +52,6 @@ class HistoryDatabase:
                 )
                 """
             )
-            # Ensure metadata_note column exists on pre-existing DB files
             cols = {
                 row[1]
                 for row in conn.execute("PRAGMA table_info(conversion_history)").fetchall()
@@ -60,6 +60,10 @@ class HistoryDatabase:
                 conn.execute(
                     "ALTER TABLE conversion_history ADD COLUMN metadata_note TEXT DEFAULT ''"
                 )
+            if "profile_name" not in cols:
+                conn.execute(
+                    "ALTER TABLE conversion_history ADD COLUMN profile_name TEXT DEFAULT ''"
+                )
 
             conn.execute(
                 """
@@ -67,6 +71,19 @@ class HistoryDatabase:
                     sha256 TEXT PRIMARY KEY,
                     output_filename TEXT NOT NULL,
                     created_at REAL NOT NULL
+                )
+                """
+            )
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quarantine_items (
+                    quarantine_filename TEXT PRIMARY KEY,
+                    original_rel_path TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 2,
+                    error_reason TEXT NOT NULL,
+                    quarantined_at REAL NOT NULL
                 )
                 """
             )
@@ -95,19 +112,66 @@ class HistoryDatabase:
             )
             conn.commit()
 
+    def record_quarantine(
+        self,
+        quarantine_filename: str,
+        original_rel_path: str,
+        size_bytes: int,
+        attempts: int,
+        error_reason: str,
+    ) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO quarantine_items (
+                    quarantine_filename, original_rel_path, size_bytes, attempts, error_reason, quarantined_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    quarantine_filename,
+                    original_rel_path,
+                    size_bytes,
+                    attempts,
+                    error_reason,
+                    time.time(),
+                ),
+            )
+            conn.commit()
+
+    def get_quarantine_meta(self, quarantine_filename: str) -> Optional[Dict]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM quarantine_items WHERE quarantine_filename = ? LIMIT 1",
+                (quarantine_filename,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def remove_quarantine_meta(self, quarantine_filename: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "DELETE FROM quarantine_items WHERE quarantine_filename = ?",
+                (quarantine_filename,),
+            )
+            conn.commit()
+
+    def clear_quarantine_meta(self) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM quarantine_items")
+            conn.commit()
+
     def record(self, entry: Dict) -> int:
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO conversion_history (
-                    original_filename, output_filename, media_type, mode,
+                    original_filename, output_filename, media_type, mode, profile_name,
                     orig_width, orig_height, orig_mp, orig_bytes,
                     out_width, out_height, out_mp, out_bytes,
                     saved_bytes, saved_pct, exif_preserved,
                     camera_model, date_taken, gps_coords, metadata_note,
                     original_deleted, duration_ms, status, error_message, created_at
                 ) VALUES (
-                    :original_filename, :output_filename, :media_type, :mode,
+                    :original_filename, :output_filename, :media_type, :mode, :profile_name,
                     :orig_width, :orig_height, :orig_mp, :orig_bytes,
                     :out_width, :out_height, :out_mp, :out_bytes,
                     :saved_bytes, :saved_pct, :exif_preserved,
@@ -120,6 +184,7 @@ class HistoryDatabase:
                     "output_filename": entry.get("output_filename", ""),
                     "media_type": entry.get("media_type", "photo"),
                     "mode": entry.get("mode", "storage_saver"),
+                    "profile_name": entry.get("profile_name", ""),
                     "orig_width": entry.get("orig_width", 0),
                     "orig_height": entry.get("orig_height", 0),
                     "orig_mp": entry.get("orig_mp", 0.0),
@@ -170,10 +235,14 @@ class HistoryDatabase:
                 WHERE status = 'completed'
                 """
             ).fetchone()
+            q_row = conn.execute(
+                "SELECT COUNT(*) AS quarantined_total FROM conversion_history WHERE status = 'quarantined'"
+            ).fetchone()
             data = dict(row) if row else {}
             orig = data.get("total_orig_bytes") or 0
             saved = data.get("total_saved_bytes") or 0
             data["avg_saved_pct"] = round((saved / orig) * 100.0, 1) if orig > 0 else 0.0
+            data["quarantined_total"] = int(q_row["quarantined_total"]) if q_row else 0
             return data
 
     def lookup_by_output(self, output_filename: str) -> Dict | None:

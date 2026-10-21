@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pixel Photo NAS — Google Photos Storage Saver Relay</title>
+  <title>Pixel Photo NAS — Android Unlimited Google Photos Relay</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -83,11 +83,11 @@
 
       <div class="pipeline-node pipeline-node-engine">
         <div class="node-header">
-          <span class="node-step">CONVERTER ENGINE</span>
+          <span class="node-step">CONVERTER &amp; PROFILE ROUTER</span>
           <span class="badge badge-accent" id="modeBadge">Storage Saver ON</span>
         </div>
         <div class="node-engine-desc" id="engineSummaryLine">
-          ≤16 MP JPEG (85%) · 1080p MP4 · EXIF Kept · Delete High-Res ON
+          ≤16 MP JPEG (85%) · 1080p MP4 · Folder Profiles + Quarantine Guard
         </div>
         <div class="active-job-bar" id="activeJobBar" hidden>
           <span class="spinner"></span>
@@ -120,21 +120,25 @@
     <!-- Navigation Tabs -->
     <nav class="tabs-bar" role="tablist">
       <button class="tab-btn active" data-tab="overview" role="tab" aria-selected="true">
-        Pipeline &amp; Folders
+        Pipeline &amp; Profiles
       </button>
       <button class="tab-btn" data-tab="gallery" role="tab" aria-selected="false">
         Media Gallery &amp; EXIF
         <span class="tab-counter" id="galleryTabCount">0</span>
       </button>
+      <button class="tab-btn" data-tab="quarantine" role="tab" aria-selected="false">
+        Quarantine
+        <span class="tab-counter" id="quarantineTabCount">0</span>
+      </button>
       <button class="tab-btn" data-tab="network" role="tab" aria-selected="false">
-        NAS Mounts &amp; Pixel APK
+        Android Widget &amp; NAS Mounts
       </button>
       <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false">
         Settings
       </button>
     </nav>
 
-    <!-- TAB 1: OVERVIEW / UPLOAD / FOLDERS / LEDGER -->
+    <!-- TAB 1: OVERVIEW / UPLOAD / PER-FOLDER PROFILES / FOLDERS / LEDGER -->
     <section class="tab-panel active" id="tab-overview">
       <div class="grid-two">
         <!-- Upload Card -->
@@ -142,8 +146,18 @@
           <div class="card-head">
             <div>
               <h2>Upload Photos &amp; Videos to Incoming</h2>
-              <p class="muted">Drop high-res camera files here (or upload via WebDAV, FTP, or Syncthing).</p>
+              <p class="muted">Upload from Browser, Android Home Screen Widget, Share Sheet, WebDAV, FTP, or Syncthing.</p>
             </div>
+          </div>
+
+          <div class="upload-profile-bar">
+            <label for="uploadProfileSelect">Target Folder Profile:</label>
+            <select id="uploadProfileSelect" class="profile-select">
+              <option value="">Global Default (/Incoming)</option>
+              <option value="StorageSaver">StorageSaver (/Incoming/StorageSaver → ≤16 MP)</option>
+              <option value="Original">Original (/Incoming/Original → 100% Untouched)</option>
+              <option value="Family">Family (/Incoming/Family → Output/Family)</option>
+            </select>
           </div>
 
           <div class="dropzone" id="uploadDropzone" tabindex="0" role="button" aria-label="Upload photos or videos">
@@ -155,8 +169,8 @@
                 <line x1="12" y1="3" x2="12" y2="15"></line>
               </svg>
             </div>
-            <p class="dropzone-title">Drag &amp; drop high-res photos/videos or <span class="linkish">browse files</span></p>
-            <p class="dropzone-hint">Supports 48MP–200MP JPG, PNG, HEIC, AVIF, WebP, TIFF &amp; 4K MP4/MOV/MKV</p>
+            <p class="dropzone-title">Drag &amp; drop high-res Android camera photos/videos or <span class="linkish">browse files</span></p>
+            <p class="dropzone-hint">Supports 50MP–200MP JPG, PNG, HEIC, AVIF, WebP, TIFF &amp; 4K MP4/MOV/MKV</p>
           </div>
 
           <div class="upload-progress" id="uploadProgressWrap" hidden>
@@ -168,12 +182,13 @@
 
           <div class="demo-actions">
             <div class="demo-actions-text">
-              <strong>Test right now with real camera, WhatsApp &amp; Takeout metadata:</strong>
-              <span>Drops 48MP iPhone, 24MP Portrait Sony, WhatsApp stripped-EXIF image, 50MP Google Takeout + <code>.json</code> sidecar &amp; 4K clip into <code>Incoming/</code></span>
+              <strong>Test Android Per-Folder Profiles + Smart EXIF + Quarantine right now:</strong>
+              <span>Drops 50MP Pixel 9 Pro (<code>StorageSaver/</code>), 24MP Galaxy S24 Ultra (<code>Original/</code>), WhatsApp image (<code>Family/</code>), 50MP Takeout + JSON &amp; 4K clip</span>
             </div>
             <div class="demo-btn-group">
-              <button class="btn btn-secondary" id="seedPhotosBtn">Drop Sample Photos</button>
+              <button class="btn btn-secondary" id="seedPhotosBtn">Drop Android Photos</button>
               <button class="btn btn-primary" id="seedAllBtn">Drop Photos + Takeout + 4K Video</button>
+              <button class="btn btn-danger btn-sm" id="seedCorruptBtn" title="Simulate a half-finished/corrupted Wi-Fi upload to test automatic Quarantine isolation">Simulate Corrupted Transfer</button>
             </div>
           </div>
         </div>
@@ -190,8 +205,8 @@
           <div class="toggle-list">
             <label class="toggle-row" for="toggleStorageSaver">
               <div class="toggle-copy">
-                <span class="toggle-title">Convert to Storage Saver Quality</span>
-                <span class="toggle-sub">Downscale photos &gt;16 MP to 16 MP JPEG (85%) with 100% EXIF Date &amp; GPS kept. Turn OFF to move full-res originals untouched.</span>
+                <span class="toggle-title">Global Default: Convert to Storage Saver Quality</span>
+                <span class="toggle-sub">Downscale photos &gt;16 MP to 16 MP JPEG (85%) with 100% EXIF Date &amp; GPS kept. Per-Folder Profiles override this per subfolder.</span>
               </div>
               <input type="checkbox" class="switch-input" id="toggleStorageSaver" checked />
             </label>
@@ -214,8 +229,8 @@
 
             <label class="toggle-row" for="toggleAutoWatch">
               <div class="toggle-copy">
-                <span class="toggle-title">Auto-Watch &amp; Recursive Subfolder Sync</span>
-                <span class="toggle-sub">Watches <code>Incoming/</code> and nested album folders automatically (ignores partial <code>.syncthing</code>/<code>.tmp</code> files).</span>
+                <span class="toggle-title">Auto-Watch, Per-Folder Profiles &amp; Quarantine Guard</span>
+                <span class="toggle-sub">Watches <code>Incoming/*</code> automatically and isolates broken files into <code>Quarantine/</code> after 2 failed retries.</span>
               </div>
               <input type="checkbox" class="switch-input" id="toggleAutoWatch" checked />
             </label>
@@ -223,7 +238,7 @@
             <label class="toggle-row" for="toggleSmartMetadata">
               <div class="toggle-copy">
                 <span class="toggle-title">Smart EXIF Repair (WhatsApp Dates + Google Takeout JSON + SHA-256 Dedup)</span>
-                <span class="toggle-sub">Rebuilds missing EXIF dates from filenames, merges Takeout <code>.json</code> GPS/dates, and skips duplicate files.</span>
+                <span class="toggle-sub">Rebuilds missing EXIF dates from Android filenames, merges Takeout <code>.json</code> GPS/dates, and skips duplicate files.</span>
               </div>
               <input type="checkbox" class="switch-input" id="toggleSmartMetadata" checked />
             </label>
@@ -234,6 +249,28 @@
             <span class="muted small-note" id="diskUsageNote">Checking storage...</span>
           </div>
         </div>
+      </div>
+
+      <!-- Per-Folder Profiles Card -->
+      <div class="card section-gap">
+        <div class="card-head">
+          <div>
+            <h2>Per-Folder Upload Profiles (<code>/Incoming/&lt;Folder&gt;/</code>)</h2>
+            <p class="muted">Drop files into any subfolder via Android Widget, FolderSync, WebDAV, FTP, or Syncthing to apply its automatic quality &amp; album rule.</p>
+          </div>
+        </div>
+
+        <div class="profile-rules-grid" id="profileRulesList"></div>
+
+        <form class="add-profile-bar" id="addProfileForm">
+          <input type="text" id="newProfileFolder" placeholder="Subfolder name (e.g. Partner, Kids, Trip2026)" required />
+          <select id="newProfileMode">
+            <option value="saver">Storage Saver (≤16 MP + 1080p)</option>
+            <option value="original">Original Quality (100% Untouched)</option>
+          </select>
+          <input type="text" id="newProfileOutSub" placeholder="Output album subfolder (optional, e.g. Family)" />
+          <button type="submit" class="btn btn-secondary">+ Add Folder Rule</button>
+        </form>
       </div>
 
       <!-- Dual Live Folder Explorer: Folder 1 (Incoming) vs Folder 2 (Output) -->
@@ -257,14 +294,14 @@
           <div class="card-head">
             <div>
               <h2>Folder 2: Google Photos Output</h2>
-              <p class="muted">Ready for Google Photos backup on your Pixel. Click any item to inspect EXIF &amp; savings.</p>
+              <p class="muted">Ready for Google Photos backup on your Pixel. Click any item to inspect EXIF &amp; profile used.</p>
             </div>
             <div class="card-actions">
               <button class="btn btn-ghost btn-sm" id="clearOutputBtn" title="Free local space after Google Photos finishes cloud sync">Clear Synced</button>
             </div>
           </div>
           <div class="file-list" id="outputFileList">
-            <div class="empty-state">No converted photos in Output yet. Drop photos or click "Drop Photos + 4K Video" above!</div>
+            <div class="empty-state">No converted photos in Output yet. Drop photos or click "Drop Photos + Takeout + 4K Video" above!</div>
           </div>
         </div>
       </div>
@@ -274,7 +311,7 @@
         <div class="card-head">
           <div>
             <h2>Conversion &amp; Deletion History</h2>
-            <p class="muted">Every processed file with before/after megapixels, bytes freed, EXIF verification, and source cleanup status.</p>
+            <p class="muted">Every processed file with matched folder profile, before/after megapixels, bytes freed, EXIF verification, and cleanup status.</p>
           </div>
           <div class="card-actions">
             <button class="btn btn-ghost btn-sm" id="clearHistoryBtn">Clear Log</button>
@@ -285,7 +322,7 @@
             <thead>
               <tr>
                 <th>File</th>
-                <th>Mode</th>
+                <th>Profile &amp; Mode</th>
                 <th>Original (Folder 1)</th>
                 <th>Output (Folder 2)</th>
                 <th>Space Saved</th>
@@ -318,22 +355,43 @@
       </div>
     </section>
 
-    <!-- TAB 3: NAS NETWORK MOUNTS & PIXEL 1-5 ANDROID APK -->
+    <!-- TAB 3: QUARANTINE FOLDER FOR CORRUPTED TRANSFERS -->
+    <section class="tab-panel" id="tab-quarantine">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h2>Quarantine Folder (<code>PixelNAS/Quarantine/</code>)</h2>
+            <p class="muted">Half-transferred or corrupted files are isolated here after 2 failed decode attempts (shielded by <code>.nomedia</code>) so they never stall your watcher queue.</p>
+          </div>
+          <div class="card-actions">
+            <button class="btn btn-secondary btn-sm" id="testCorruptTabBtn">Simulate Corrupted Transfer</button>
+            <button class="btn btn-primary btn-sm" id="retryAllQuarantineBtn">Retry All</button>
+            <button class="btn btn-ghost btn-sm" id="clearQuarantineBtn">Clear Quarantine</button>
+          </div>
+        </div>
+
+        <div class="file-list" id="quarantineList">
+          <div class="empty-state">No corrupted transfers in Quarantine — pipeline is 100% healthy!</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: ANDROID HOME SCREEN WIDGET & NAS NETWORK MOUNTS -->
     <section class="tab-panel" id="tab-network">
       <div class="grid-two">
         <div class="card">
           <div class="card-head">
             <div>
-              <h2>Mount Your Pixel NAS Over Wi-Fi</h2>
-              <p class="muted">Connect from Windows, macOS, Linux, iPhone, or another Android phone — drop files straight into <code>Incoming</code>.</p>
+              <h2>Android Home Screen Upload Widget &amp; Wi-Fi Mounts</h2>
+              <p class="muted">Install the APK on BOTH your closet Pixel 1–5 NAS and your daily Android phone — pin the Home Screen Upload Widget for 1-tap uploads!</p>
             </div>
           </div>
 
           <div class="qr-box">
             <img id="portalQrImg" alt="Scan to open Pixel NAS Web UI" class="qr-image" />
             <div class="qr-meta">
-              <strong>Scan from any phone on Wi-Fi</strong>
-              <p class="muted">Opens this drag-and-drop photo uploader directly in Safari or Chrome — no app needed on your daily phone.</p>
+              <strong>Scan from your daily Android phone on Wi-Fi</strong>
+              <p class="muted">Paste this NAS Server URL into the Android Upload Widget or open directly in Chrome.</p>
               <div class="endpoint-copy-row">
                 <code id="endpointWebUrl">http://...</code>
                 <button class="btn btn-secondary btn-sm copy-btn" data-copy-target="endpointWebUrl">Copy</button>
@@ -344,17 +402,30 @@
           <div class="protocol-cards">
             <div class="protocol-item">
               <div class="protocol-header">
-                <strong>WebDAV Network Drive (Windows / Mac / PhotoSync / FolderSync)</strong>
+                <strong>Native Android Home Screen Widget + Share Sheet</strong>
+                <span class="badge badge-accent">Built Into APK</span>
+              </div>
+              <p class="protocol-help">
+                1. Long-press your daily Android phone's Home Screen → <strong>Widgets → Pixel Photo NAS</strong> (or tap <em>Pin Upload Widget to Home Screen</em> inside the app).<br />
+                2. Tap <strong>Saver (≤16 MP)</strong>, <strong>Original</strong>, or <strong>Family</strong> right on your Home Screen to open Android Photo Picker &amp; beam multi-photo batches straight to your closet Pixel NAS!<br />
+                3. Also works directly from Android's <strong>Share Sheet</strong> in Google Gallery, Samsung Gallery, or Files.
+              </p>
+            </div>
+
+            <div class="protocol-item">
+              <div class="protocol-header">
+                <strong>WebDAV Per-Folder Endpoints (FolderSync / Round Sync / Solid Explorer)</strong>
                 <span class="badge badge-success">Active</span>
               </div>
               <div class="endpoint-copy-row">
-                <code id="endpointWebdavUrl">http://.../webdav/Incoming/</code>
+                <code id="endpointWebdavUrl">http://.../webdav/Incoming/StorageSaver/</code>
                 <button class="btn btn-secondary btn-sm copy-btn" data-copy-target="endpointWebdavUrl">Copy</button>
               </div>
               <p class="protocol-help">
-                <strong>macOS Finder:</strong> Press <kbd>⌘K</kbd>, paste the URL above, mount as network drive.<br />
-                <strong>Windows Explorer:</strong> <em>This PC → Map Network Drive</em> → paste the URL.<br />
-                <strong>iOS / Android Auto-Sync:</strong> Point <em>PhotoSync</em> or <em>FolderSync</em> WebDAV target to this URL for automatic background camera roll offload!
+                Profile paths ready out of the box:<br />
+                • <code>/webdav/Incoming/StorageSaver/</code> (shrinks &gt;16 MP &amp; 4K → 1080p)<br />
+                • <code>/webdav/Incoming/Original/</code> (full-res pass-through)<br />
+                • <code>/webdav/Incoming/Family/</code> (routes to <code>DCIM/PixelNAS/Family</code>)
               </p>
             </div>
 
@@ -367,17 +438,17 @@
                 <code id="endpointFtpUrl">ftp://192.168.1.x:2121/Incoming/</code>
                 <button class="btn btn-secondary btn-sm copy-btn" data-copy-target="endpointFtpUrl">Copy</button>
               </div>
-              <p class="protocol-help">Works directly with Sony/Canon/Nikon Wi-Fi FTP transfer, Solid Explorer, Owlfiles, Cyberduck, FileZilla, and rclone.</p>
+              <p class="protocol-help">Works directly with Android Solid Explorer, Material Files, Owlfiles, Sony/Canon Wi-Fi FTP transfer, FileZilla, and rclone.</p>
             </div>
 
             <div class="protocol-item">
               <div class="protocol-header">
-                <strong>Syncthing / Resilio / Local Folder Watcher</strong>
+                <strong>Syncthing-Fork / Local Android Folder Watcher</strong>
                 <span class="badge badge-accent">Auto-Watched</span>
               </div>
               <p class="protocol-help">
-                Sync your main phone's camera folder (<em>Send Only</em> in Syncthing) into <code id="syncIncomingInline">.../Incoming</code> on your Pixel.
-                Pixel Photo NAS waits until `.syncthing.*.tmp` transfer completes, converts to Storage Saver in <code id="syncOutputInline">.../DCIM/PixelNAS</code>, notifies Android MediaStore, and cleans up the high-res copy!
+                Sync your daily Android camera folder (<em>Send Only</em> in Syncthing-Fork) into <code id="syncIncomingInline">.../Incoming/StorageSaver</code> on your Pixel.
+                Pixel Photo NAS ignores partial <code>.syncthing.*.tmp</code> transfers, converts to <code id="syncOutputInline">.../DCIM/PixelNAS</code>, notifies Android MediaStore, and cleans up high-res copies!
               </p>
             </div>
           </div>
@@ -395,16 +466,16 @@
             <div class="step-item">
               <span class="step-num">1</span>
               <div>
-                <strong>Install <code>PixelPhotoNAS.apk</code> on your Pixel 1–5</strong>
-                <p>Supports <strong>Pixel / Pixel XL (Android 8–10)</strong> through <strong>Pixel 2, 3, 3a, 4, 4a, 4a 5G, and Pixel 5 (Android 11–14)</strong>. Grant <em>All Files Access</em> &amp; <em>Notification</em> permission on first launch.</p>
+                <strong>Install <code>PixelPhotoNAS.apk</code> on your Closet Pixel 1–5 &amp; Daily Android Phone</strong>
+                <p>Supports <strong>Pixel / Pixel XL (Android 8–10)</strong> through <strong>Pixel 2, 3, 3a, 4, 4a, 4a 5G, Pixel 5, and modern Android 11–15 phones</strong>.</p>
               </div>
             </div>
 
             <div class="step-item">
               <span class="step-num">2</span>
               <div>
-                <strong>Why <code>.nomedia</code> on Folder 1 + <code>DCIM/PixelNAS</code> on Folder 2 matters</strong>
-                <p>Folder 1 (<code>/storage/emulated/0/PixelNAS/Incoming</code>) automatically contains a <code>.nomedia</code> guard so Google Photos ignores raw 50MB uploads. Once shrunk to ≤16MP &amp; 1080p, files move into Folder 2 (<code>/storage/emulated/0/DCIM/PixelNAS</code>), trigger <code>MediaScannerConnection</code>, and high-res originals are deleted.</p>
+                <strong>Why <code>.nomedia</code> on Incoming &amp; Quarantine + <code>DCIM/PixelNAS</code> Matters</strong>
+                <p>Both <code>PixelNAS/Incoming</code> and <code>PixelNAS/Quarantine</code> carry automatic <code>.nomedia</code> guards so Google Photos ignores raw 50 MB uploads and broken files. Verified outputs land in <code>DCIM/PixelNAS</code> and trigger <code>MediaScannerConnection</code> immediately.</p>
               </div>
             </div>
 
@@ -412,7 +483,7 @@
               <span class="step-num">3</span>
               <div>
                 <strong>Enable Backup on <code>PixelNAS</code> in Google Photos</strong>
-                <p>Open <strong>Google Photos → Collections / Library → Photos on device → PixelNAS</strong> and turn <strong>Backup ON</strong>. On Pixel 1 select <em>Original Quality</em>; on Pixel 2–5 select <em>Storage Saver</em> for unlimited zero-quota backups!</p>
+                <p>Open <strong>Google Photos → Collections / Library → Photos on device → PixelNAS</strong> (plus any custom album folders like <code>Family</code>) and turn <strong>Backup ON</strong>.</p>
               </div>
             </div>
 
@@ -420,7 +491,7 @@
               <span class="step-num">4</span>
               <div>
                 <strong>24/7 Closet Server Protection</strong>
-                <p>Includes <code>BOOT_COMPLETED</code> auto-restart after power loss, Wi-Fi lock, 4GB RAM OOM-safe sub-sampled decoding for 200MP photos, hardware <code>MediaCodec</code> 1080p encoding, and <strong>41°C Battery Thermal Guard</strong>.</p>
+                <p>Includes <code>BOOT_COMPLETED</code> auto-restart after power loss, mDNS auto-discovery (<code>_pixelnas._tcp</code>), Wi-Fi lock, 4 GB RAM OOM-safe decoding for 200 MP photos, hardware <code>MediaCodec</code> 1080p encoding, and <strong>41°C Battery Thermal Guard</strong>.</p>
               </div>
             </div>
           </div>
@@ -428,13 +499,13 @@
       </div>
     </section>
 
-    <!-- TAB 4: DETAILED ENGINE SETTINGS -->
+    <!-- TAB 5: DETAILED ENGINE SETTINGS -->
     <section class="tab-panel" id="tab-settings">
       <form class="card settings-form" id="settingsForm">
         <div class="card-head">
           <div>
-            <h2>Storage Saver &amp; Folder Settings</h2>
-            <p class="muted">Configure exact resolution thresholds, folder paths, FTP port, and LAN authentication.</p>
+            <h2>Storage Saver, Quarantine &amp; Folder Settings</h2>
+            <p class="muted">Configure exact resolution thresholds, folder paths, FTP port, retention, and LAN authentication.</p>
           </div>
           <button type="submit" class="btn btn-primary">Save Settings</button>
         </div>
@@ -443,7 +514,7 @@
           <div class="field">
             <label for="inputIncomingDir">Folder 1 — Incoming High-Res Path</label>
             <input type="text" id="inputIncomingDir" required />
-            <small>Files uploaded via Web, WebDAV, FTP, or Syncthing arrive here first.</small>
+            <small>Files uploaded via Android Widget, Web, WebDAV, FTP, or Syncthing arrive here first.</small>
           </div>
 
           <div class="field">
@@ -455,13 +526,13 @@
           <div class="field">
             <label for="inputMaxMp">Max Photo Megapixels: <strong id="labelMaxMp">16.0 MP</strong></label>
             <input type="range" id="inputMaxMp" min="8" max="24" step="0.5" value="16" />
-            <small>Google Photos Storage Saver limit is exactly <strong>16.0 MP</strong> (e.g., 4618×3464 for 4:3 photos).</small>
+            <small>Google Photos Storage Saver limit is <strong>16.0 MP</strong> (e.g., 4618×3464 for 4:3 photos).</small>
           </div>
 
           <div class="field">
             <label for="inputJpegQuality">JPEG Compression Quality: <strong id="labelJpegQuality">85%</strong></label>
             <input type="range" id="inputJpegQuality" min="65" max="95" step="1" value="85" />
-            <small>85% matches Google Photos visual quality while cutting 48MP file sizes by 80–90%.</small>
+            <small>85% matches Google Photos visual quality while cutting 50 MP file sizes by 80–90%.</small>
           </div>
 
           <div class="field">

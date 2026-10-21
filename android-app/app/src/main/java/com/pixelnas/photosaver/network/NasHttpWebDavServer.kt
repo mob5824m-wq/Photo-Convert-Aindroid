@@ -12,6 +12,7 @@ import com.pixelnas.photosaver.converter.StorageSaverConverter
 import com.pixelnas.photosaver.data.HistoryStore
 import com.pixelnas.photosaver.data.NasPreferences
 import com.pixelnas.photosaver.model.ConversionRecord
+import com.pixelnas.photosaver.model.FolderProfileRule
 import com.pixelnas.photosaver.util.PixelDeviceDetector
 import com.pixelnas.photosaver.watcher.IncomingFolderWatcher
 import io.ktor.http.ContentType
@@ -65,24 +66,41 @@ class NasHttpWebDavServer(
 ) {
     private var engine: CIOApplicationEngine? = null
 
+    private fun resolveFolderRoot(folder: String): File {
+        val (incDir, outDir) = prefs.ensureFolders()
+        return when (folder) {
+            "incoming" -> incDir
+            "quarantine" -> prefs.quarantineFolder()
+            else -> outDir
+        }
+    }
+
+    private fun resolveSubFile(baseDir: File, rawSubPath: String): File? {
+        val clean = URLDecoder.decode(rawSubPath, "UTF-8").trim('/')
+        if (clean.isBlank()) return null
+        val target = File(baseDir, clean).canonicalFile
+        val rootCanonical = baseDir.canonicalFile
+        return if (target.path.startsWith(rootCanonical.path)) target else null
+    }
+
     @Synchronized
     fun start() {
         stop()
         val port = prefs.current.httpPort
         val srv = embeddedServer(CIO, host = "0.0.0.0", port = port) {
             routing {
-                // Static Web UI served directly from APK assets/webui/
                 get("/") { serveAsset(call, "webui/index.html", ContentType.Text.Html) }
                 get("/index.html") { serveAsset(call, "webui/index.html", ContentType.Text.Html) }
                 get("/styles.css") { serveAsset(call, "webui/styles.css", ContentType.Text.CSS) }
                 get("/app.js") { serveAsset(call, "webui/app.js", ContentType.Application.JavaScript) }
 
-                // JSON Status API (100% compatible with shared Web Portal)
                 get("/api/status") {
                     val cfg = prefs.current
                     val (incDir, outDir) = prefs.ensureFolders()
-                    val incFiles = incDir.listFiles()?.filter { it.isFile && !it.name.startsWith(".") }.orEmpty()
-                    val outFiles = outDir.listFiles()?.filter { it.isFile && !it.name.startsWith(".") }.orEmpty()
+                    val quarDir = prefs.quarantineFolder()
+                    val incFiles = watcher.listIncomingFiles(incDir, cfg.recursiveSubfolders)
+                    val outFiles = watcher.listOutputFiles(outDir)
+                    val quarFiles = quarDir.listFiles()?.filter { it.isFile && !it.name.startsWith(".") }.orEmpty()
                     val statFs = StatFs(outDir.absolutePath)
                     val totalBytes = statFs.totalBytes
                     val freeBytes = statFs.availableBytes
@@ -97,13 +115,14 @@ class NasHttpWebDavServer(
 
                     val root = JSONObject().apply {
                         put("app_name", "Pixel Photo NAS")
-                        put("version", "1.0.0")
+                        put("version", "1.2.0")
                         put("settings", configToJson(cfg, hw.displayName, hw.googlePhotosTier, hw.notes))
                         put("worker", JSONObject().apply {
                             put("watcher_running", wState.serviceRunning)
                             put("auto_watch_enabled", cfg.autoWatchEnabled)
                             put("queue_size", wState.queueSize)
                             put("active_file", wState.activeFile ?: JSONObject.NULL)
+                            put("quarantined_total", wState.quarantinedTotal)
                             put("last_error", wState.lastError)
                         })
                         put("stats", summaryToJson(summary))
@@ -119,6 +138,11 @@ class NasHttpWebDavServer(
                                 put("file_count", outFiles.size)
                                 put("total_bytes", outFiles.sumOf { it.length() })
                             })
+                            put("quarantine", JSONObject().apply {
+                                put("path", quarDir.absolutePath)
+                                put("file_count", quarFiles.size)
+                                put("total_bytes", quarFiles.sumOf { it.length() })
+                            })
                         })
                         put("storage", JSONObject().apply {
                             put("total_bytes", totalBytes)
@@ -131,9 +155,12 @@ class NasHttpWebDavServer(
                             put("web_ui_url", baseUrl)
                             put("webdav_url", "$baseUrl/webdav/")
                             put("webdav_incoming_url", "$baseUrl/webdav/Incoming/")
+                            put("webdav_saver_url", "$baseUrl/webdav/Incoming/StorageSaver/")
+                            put("webdav_original_url", "$baseUrl/webdav/Incoming/Original/")
+                            put("webdav_family_url", "$baseUrl/webdav/Incoming/Family/")
                             put("ftp_enabled", ftpServer.activePort > 0)
                             put("ftp_port", if (ftpServer.activePort > 0) ftpServer.activePort else cfg.ftpPort)
-                            put("ftp_url", "ftp://${ips.first()}:${cfg.ftpPort}/")
+                            put("ftp_url", "ftp://${ips.first()}:${cfg.ftpPort}/Incoming/")
                             put("video_engine_available", true)
                         })
                     }
@@ -151,6 +178,31 @@ class NasHttpWebDavServer(
                 post("/api/settings") {
                     val body = JSONObject(call.receiveText())
                     val updated = prefs.update { old ->
+                        val nextProfiles = if (body.has("folder_profiles")) {
+                            val arr = body.optJSONArray("folder_profiles") ?: JSONArray()
+                            val parsed = mutableListOf<FolderProfileRule>()
+                            for (i in 0 until arr.length()) {
+                                val item = arr.optJSONObject(i) ?: continue
+                                val fn = item.optString("folder_name", "").replace(Regex("[^A-Za-z0-9._-]"), "")
+                                if (fn.isNotBlank()) {
+                                    parsed.add(
+                                        FolderProfileRule(
+                                            folderName = fn,
+                                            storageSaverEnabled = item.optBoolean("storage_saver_enabled", true),
+                                            maxMegapixels = item.optDouble("max_megapixels", 16.0),
+                                            jpegQuality = item.optInt("jpeg_quality", 85).coerceIn(40, 98),
+                                            compressVideos = item.optBoolean("compress_videos", true),
+                                            outputSubfolder = item.optString("output_subfolder", "")
+                                                .replace(Regex("[^A-Za-z0-9._/-]"), "")
+                                                .trim('/')
+                                        )
+                                    )
+                                }
+                            }
+                            parsed
+                        } else {
+                            old.folderProfiles
+                        }
                         old.copy(
                             deviceProfile = body.optString("device_profile", old.deviceProfile),
                             storageSaverEnabled = body.optBoolean("storage_saver_enabled", old.storageSaverEnabled),
@@ -160,6 +212,7 @@ class NasHttpWebDavServer(
                             skipDuplicates = body.optBoolean("skip_duplicates", old.skipDuplicates),
                             restoreExifFromFilename = body.optBoolean("restore_exif_from_filename", old.restoreExifFromFilename),
                             mergeTakeoutJson = body.optBoolean("merge_takeout_json", old.mergeTakeoutJson),
+                            quarantineEnabled = body.optBoolean("quarantine_enabled", old.quarantineEnabled),
                             autoPurgeOutputDays = body.optInt("auto_purge_output_days", old.autoPurgeOutputDays),
                             minFreeStorageGb = body.optDouble("min_free_storage_gb", old.minFreeStorageGb.toDouble()).toFloat(),
                             maxMegapixels = body.optDouble("max_megapixels", old.maxMegapixels),
@@ -167,6 +220,8 @@ class NasHttpWebDavServer(
                             maxVideoShortSide = body.optInt("max_video_short_side", old.maxVideoShortSide),
                             incomingDir = body.optString("incoming_dir", old.incomingDir),
                             outputDir = body.optString("output_dir", old.outputDir),
+                            quarantineDir = body.optString("quarantine_dir", old.quarantineDir),
+                            folderProfiles = nextProfiles,
                             ftpPort = body.optInt("ftp_port", old.ftpPort),
                             authEnabled = body.optBoolean("auth_enabled", old.authEnabled),
                             authUsername = body.optString("auth_username", old.authUsername),
@@ -187,19 +242,23 @@ class NasHttpWebDavServer(
                     val folder = call.request.queryParameters["folder"] ?: "output"
                     val (incDir, outDir) = prefs.ensureFolders()
                     val targetDir = if (folder == "incoming") incDir else outDir
+                    val files = if (folder == "incoming") {
+                        watcher.listIncomingFiles(incDir, prefs.current.recursiveSubfolders)
+                    } else {
+                        watcher.listOutputFiles(outDir)
+                    }
                     val arr = JSONArray()
-                    targetDir.listFiles()
-                        ?.filter { it.isFile && !it.name.startsWith(".") }
-                        ?.sortedByDescending { it.lastModified() }
-                        ?.forEach { file ->
-                            val item = inspectFileJson(file, folder)
-                            if (folder == "output") {
-                                historyStore.lookupByOutput(file.name)?.let {
-                                    item.put("conversion", recordToJson(it))
-                                }
+                    files.sortedByDescending { it.lastModified() }.forEach { file ->
+                        val item = inspectFileJson(file, folder, targetDir)
+                        if (folder == "output") {
+                            val rel = file.relativeTo(outDir).invariantSeparatorsPath
+                            val hist = historyStore.lookupByOutput(rel) ?: historyStore.lookupByOutput(file.name)
+                            if (hist != null) {
+                                item.put("conversion", recordToJson(hist))
                             }
-                            arr.put(item)
                         }
+                        arr.put(item)
+                    }
                     val resp = JSONObject().apply {
                         put("folder", folder)
                         put("path", targetDir.absolutePath)
@@ -208,31 +267,100 @@ class NasHttpWebDavServer(
                     call.respondText(resp.toString(), ContentType.Application.Json)
                 }
 
+                get("/api/quarantine") {
+                    val quarDir = prefs.quarantineFolder()
+                    val arr = JSONArray()
+                    quarDir.listFiles()
+                        ?.filter { it.isFile && !it.name.startsWith(".") }
+                        ?.sortedByDescending { it.lastModified() }
+                        ?.forEach { p ->
+                            val meta = historyStore.getQuarantineMeta(p.name)
+                            val enc = URLEncoder.encode(p.name, "UTF-8").replace("+", "%20")
+                            arr.put(
+                                JSONObject().apply {
+                                    put("name", p.name)
+                                    put("original_rel_path", meta?.originalRelPath ?: p.name)
+                                    put("size_bytes", p.length())
+                                    put("attempts", meta?.attempts ?: 2)
+                                    put("error_reason", meta?.errorReason ?: "Corrupted or unreadable media stream")
+                                    put("quarantined_at", meta?.quarantinedAtEpochSec ?: (p.lastModified() / 1000.0))
+                                    put("download_url", "/api/media/quarantine/$enc")
+                                }
+                            )
+                        }
+                    call.respondText(
+                        JSONObject().put("path", quarDir.absolutePath).put("count", arr.length()).put("items", arr).toString(),
+                        ContentType.Application.Json
+                    )
+                }
+
+                post("/api/quarantine/retry") {
+                    val body = try { JSONObject(call.receiveText()) } catch (_: Exception) { JSONObject() }
+                    val filename = body.optString("filename", "")
+                    if (filename.isNotBlank()) {
+                        val restored = watcher.retryQuarantineFile(filename)
+                        call.respondText(
+                            JSONObject().put("retried", if (restored != null) 1 else 0).put("restored_to", restored ?: "").toString(),
+                            ContentType.Application.Json
+                        )
+                    } else {
+                        val count = watcher.retryAllQuarantine()
+                        call.respondText(JSONObject().put("retried", count).toString(), ContentType.Application.Json)
+                    }
+                }
+
+                delete("/api/quarantine/{filename}") {
+                    val quarDir = prefs.quarantineFolder()
+                    val name = File(call.parameters["filename"] ?: "").name
+                    val target = File(quarDir, name)
+                    if (target.isFile) target.delete()
+                    historyStore.removeQuarantineMeta(name)
+                    call.respondText(JSONObject().put("deleted", name).toString(), ContentType.Application.Json)
+                }
+
+                post("/api/quarantine/clear") {
+                    val quarDir = prefs.quarantineFolder()
+                    var removed = 0
+                    quarDir.listFiles()?.forEach {
+                        if (it.isFile && !it.name.startsWith(".") && it.delete()) removed++
+                    }
+                    historyStore.clearQuarantineMeta()
+                    call.respondText(JSONObject().put("deleted_count", removed).toString(), ContentType.Application.Json)
+                }
+
                 post("/api/upload") {
                     val (incDir, _) = prefs.ensureFolders()
+                    val rawProfile = call.request.queryParameters["profile"]
+                        ?.replace(Regex("[^A-Za-z0-9._-]"), "")
+                        .orEmpty()
+                    val targetDir = if (rawProfile.isNotBlank()) File(incDir, rawProfile).apply { mkdirs() } else incDir
                     val multipart = call.receiveMultipart()
                     val uploaded = JSONArray()
                     multipart.forEachPart { part ->
                         if (part is PartData.FileItem) {
                             val rawName = File(part.originalFileName ?: "upload_${UUID.randomUUID()}.jpg").name
-                            var dest = File(incDir, rawName)
+                            var dest = File(targetDir, rawName)
                             if (dest.exists()) {
-                                dest = File(incDir, "${dest.nameWithoutExtension}_${UUID.randomUUID().toString().take(6)}.${dest.extension}")
+                                dest = File(targetDir, "${dest.nameWithoutExtension}_${UUID.randomUUID().toString().take(6)}.${dest.extension}")
                             }
-                            val tmp = File(incDir, ".upload_${UUID.randomUUID()}.part")
+                            val tmp = File(targetDir, ".upload_${UUID.randomUUID()}.part")
                             part.streamProvider().use { input ->
                                 FileOutputStream(tmp).use { output -> input.copyTo(output, 65536) }
                             }
                             tmp.renameTo(dest)
                             if (StorageSaverConverter.isSupportedMedia(dest)) {
                                 watcher.enqueueIfAuto(dest)
-                                uploaded.put(dest.name)
+                                uploaded.put(dest.relativeTo(incDir).invariantSeparatorsPath)
                             }
                         }
                         part.dispose()
                     }
                     call.respondText(
-                        JSONObject().put("uploaded", uploaded).put("auto_queued", prefs.current.autoWatchEnabled).toString(),
+                        JSONObject()
+                            .put("uploaded", uploaded)
+                            .put("profile", rawProfile.ifBlank { "default" })
+                            .put("auto_queued", prefs.current.autoWatchEnabled)
+                            .toString(),
                         ContentType.Application.Json
                     )
                 }
@@ -252,6 +380,13 @@ class NasHttpWebDavServer(
                     )
                 }
 
+                post("/api/demo/corrupt") {
+                    val (incDir, _) = prefs.ensureFolders()
+                    val seeded = StorageSaverConverter.seedCorruptedTransfer(incDir)
+                    if (prefs.current.autoWatchEnabled) watcher.processAllNow()
+                    call.respondText(JSONObject().put("seeded", seeded).toString(), ContentType.Application.Json)
+                }
+
                 get("/api/history") {
                     val arr = JSONArray()
                     historyStore.recent(60).forEach { arr.put(recordToJson(it)) }
@@ -266,47 +401,49 @@ class NasHttpWebDavServer(
                     call.respondText(JSONObject().put("cleared", true).toString(), ContentType.Application.Json)
                 }
 
-                delete("/api/files/{folder}/{filename}") {
-                    val folder = call.parameters["folder"] ?: "output"
-                    val name = File(call.parameters["filename"] ?: "").name
-                    val (incDir, outDir) = prefs.ensureFolders()
-                    val target = File(if (folder == "incoming") incDir else outDir, name)
-                    if (target.isFile) target.delete()
-                    call.respondText(JSONObject().put("deleted", name).toString(), ContentType.Application.Json)
-                }
-
                 post("/api/files/{folder}/clear") {
                     val folder = call.parameters["folder"] ?: "output"
-                    val (incDir, outDir) = prefs.ensureFolders()
-                    val dir = if (folder == "incoming") incDir else outDir
+                    val base = resolveFolderRoot(folder)
                     var removed = 0
-                    dir.listFiles()?.forEach {
+                    base.walkTopDown().forEach {
                         if (it.isFile && !it.name.startsWith(".") && it.delete()) removed++
                     }
                     call.respondText(JSONObject().put("deleted_count", removed).toString(), ContentType.Application.Json)
                 }
 
-                get("/api/media/{folder}/{filename}") {
-                    val folder = call.parameters["folder"] ?: "output"
-                    val name = File(call.parameters["filename"] ?: "").name
-                    val (incDir, outDir) = prefs.ensureFolders()
-                    val target = File(if (folder == "incoming") incDir else outDir, name)
-                    if (!target.isFile) {
-                        call.respondText("Not Found", status = HttpStatusCode.NotFound)
-                    } else {
-                        call.respondFile(target)
+                route("/api/files/{folder}/{...}") {
+                    delete {
+                        val folder = call.parameters["folder"] ?: "output"
+                        val sub = call.request.path().removePrefix("/api/files/$folder/")
+                        val target = resolveSubFile(resolveFolderRoot(folder), sub)
+                        if (target != null && target.isFile) target.delete()
+                        call.respondText(JSONObject().put("deleted", sub).toString(), ContentType.Application.Json)
                     }
                 }
 
-                get("/api/thumb/{folder}/{filename}") {
-                    val folder = call.parameters["folder"] ?: "output"
-                    val name = File(call.parameters["filename"] ?: "").name
-                    val (incDir, outDir) = prefs.ensureFolders()
-                    val target = File(if (folder == "incoming") incDir else outDir, name)
-                    if (!target.isFile) {
-                        call.respondText("Not Found", status = HttpStatusCode.NotFound)
-                    } else {
-                        call.respondBytes(renderThumbBytes(target), ContentType.Image.JPEG)
+                route("/api/media/{folder}/{...}") {
+                    get {
+                        val folder = call.parameters["folder"] ?: "output"
+                        val sub = call.request.path().removePrefix("/api/media/$folder/")
+                        val target = resolveSubFile(resolveFolderRoot(folder), sub)
+                        if (target == null || !target.isFile) {
+                            call.respondText("Not Found", status = HttpStatusCode.NotFound)
+                        } else {
+                            call.respondFile(target)
+                        }
+                    }
+                }
+
+                route("/api/thumb/{folder}/{...}") {
+                    get {
+                        val folder = call.parameters["folder"] ?: "output"
+                        val sub = call.request.path().removePrefix("/api/thumb/$folder/")
+                        val target = resolveSubFile(resolveFolderRoot(folder), sub)
+                        if (target == null || !target.isFile) {
+                            call.respondText("Not Found", status = HttpStatusCode.NotFound)
+                        } else {
+                            call.respondBytes(renderThumbBytes(target), ContentType.Image.JPEG)
+                        }
                     }
                 }
 
@@ -315,7 +452,6 @@ class NasHttpWebDavServer(
                     call.respondBytes(PixelDeviceDetector.renderQrPngBytes(text), ContentType.Image.PNG)
                 }
 
-                // Full RFC 4918 WebDAV Mount Endpoint (/webdav/Incoming & /webdav/Output)
                 route("/webdav/{...}") {
                     handle { handleWebDav(call) }
                 }
@@ -413,7 +549,8 @@ class NasHttpWebDavServer(
             }
             "DELETE" -> {
                 val (incDir, outDir) = prefs.ensureFolders()
-                if (fsTarget == null || !fsTarget.exists() || fsTarget == incDir || fsTarget == outDir) {
+                val quarDir = prefs.quarantineFolder()
+                if (fsTarget == null || !fsTarget.exists() || fsTarget == incDir || fsTarget == outDir || fsTarget == quarDir) {
                     call.respondText("", status = HttpStatusCode.NotFound)
                 } else {
                     fsTarget.deleteRecursively()
@@ -456,6 +593,7 @@ class NasHttpWebDavServer(
 
     private fun resolveDavPath(rel: String): Pair<String, File?> {
         val (incDir, outDir) = prefs.ensureFolders()
+        val quarDir = prefs.quarantineFolder()
         if (rel.isBlank()) return "root" to null
         val parts = rel.split("/").filter { it.isNotBlank() && it != "." && it != ".." }
         if (parts.isEmpty()) return "root" to null
@@ -464,6 +602,7 @@ class NasHttpWebDavServer(
         return when (head) {
             "incoming" -> "incoming" to (if (tail.isEmpty()) incDir else File(incDir, tail))
             "output" -> "output" to (if (tail.isEmpty()) outDir else File(outDir, tail))
+            "quarantine" -> "quarantine" to (if (tail.isEmpty()) quarDir else File(quarDir, tail))
             else -> "not_found" to null
         }
     }
@@ -475,8 +614,10 @@ class NasHttpWebDavServer(
             sb.append(davResponseEntry("/webdav/", "PixelPhotoNAS", true, 0L, System.currentTimeMillis()))
             if (depth != "0") {
                 val (incDir, outDir) = prefs.ensureFolders()
+                val quarDir = prefs.quarantineFolder()
                 sb.append(davResponseEntry("/webdav/Incoming/", "Incoming", true, 0L, incDir.lastModified()))
                 sb.append(davResponseEntry("/webdav/Output/", "Output", true, 0L, outDir.lastModified()))
+                sb.append(davResponseEntry("/webdav/Quarantine/", "Quarantine", true, 0L, quarDir.lastModified()))
             }
         } else if (fsTarget != null && fsTarget.exists()) {
             val cleanHref = "/webdav/" + rel.split("/").joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") } +
@@ -521,7 +662,7 @@ class NasHttpWebDavServer(
     private fun escapeXml(s: String): String =
         s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-    private fun inspectFileJson(file: File, folder: String): JSONObject {
+    private fun inspectFileJson(file: File, folder: String, rootDir: File): JSONObject {
         val ext = file.extension.lowercase()
         val isVideo = ext in StorageSaverConverter.VIDEO_EXTENSIONS
         var w = 0
@@ -550,9 +691,11 @@ class NasHttpWebDavServer(
             h = dims.second
         }
         val mp = if (w > 0 && h > 0) round((w.toLong() * h.toLong()) / 10000.0) / 100.0 else 0.0
-        val encName = URLEncoder.encode(file.name, "UTF-8").replace("+", "%20")
+        val relPath = try { file.relativeTo(rootDir).invariantSeparatorsPath } catch (_: Exception) { file.name }
+        val encRel = relPath.split("/").joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
         return JSONObject().apply {
             put("name", file.name)
+            put("rel_path", relPath)
             put("folder", folder)
             put("size_bytes", file.length())
             put("modified_at", file.lastModified() / 1000.0)
@@ -564,8 +707,8 @@ class NasHttpWebDavServer(
             put("date_taken", dt)
             put("gps_coords", gps)
             put("is_processing", watcher.state.value.activeFile == file.name)
-            put("media_url", "/api/media/$folder/$encName")
-            put("thumb_url", "/api/thumb/$folder/$encName?v=${file.lastModified() / 1000}")
+            put("media_url", "/api/media/$folder/$encRel")
+            put("thumb_url", "/api/thumb/$folder/$encRel?v=${file.lastModified() / 1000}")
         }
     }
 
@@ -598,6 +741,19 @@ class NasHttpWebDavServer(
     }
 
     private fun configToJson(cfg: com.pixelnas.photosaver.model.NasConfig, name: String, tier: String, notes: String): JSONObject {
+        val profilesArr = JSONArray()
+        cfg.folderProfiles.forEach { p ->
+            profilesArr.put(
+                JSONObject().apply {
+                    put("folder_name", p.folderName)
+                    put("storage_saver_enabled", p.storageSaverEnabled)
+                    put("max_megapixels", p.maxMegapixels)
+                    put("jpeg_quality", p.jpegQuality)
+                    put("compress_videos", p.compressVideos)
+                    put("output_subfolder", p.outputSubfolder)
+                }
+            )
+        }
         return JSONObject().apply {
             put("device_profile", cfg.deviceProfile)
             put("storage_saver_enabled", cfg.storageSaverEnabled)
@@ -607,6 +763,10 @@ class NasHttpWebDavServer(
             put("skip_duplicates", cfg.skipDuplicates)
             put("restore_exif_from_filename", cfg.restoreExifFromFilename)
             put("merge_takeout_json", cfg.mergeTakeoutJson)
+            put("quarantine_enabled", cfg.quarantineEnabled)
+            put("quarantine_max_retries", cfg.quarantineMaxRetries)
+            put("quarantine_dir", cfg.quarantineDir)
+            put("folder_profiles", profilesArr)
             put("auto_purge_output_days", cfg.autoPurgeOutputDays)
             put("min_free_storage_gb", cfg.minFreeStorageGb)
             put("max_megapixels", cfg.maxMegapixels)
@@ -634,6 +794,7 @@ class NasHttpWebDavServer(
         put("output_filename", r.outputFilename)
         put("media_type", r.mediaType)
         put("mode", r.mode)
+        put("profile_name", r.profileName)
         put("orig_width", r.origWidth)
         put("orig_height", r.origHeight)
         put("orig_mp", r.origMp)
@@ -651,6 +812,7 @@ class NasHttpWebDavServer(
         put("metadata_note", r.metadataNote)
         put("original_deleted", r.originalDeleted)
         put("status", r.status)
+        put("error_message", r.errorMessage)
     }
 
     private fun summaryToJson(s: com.pixelnas.photosaver.model.HistorySummary): JSONObject = JSONObject().apply {
@@ -658,6 +820,7 @@ class NasHttpWebDavServer(
         put("saver_count", s.saverCount)
         put("duplicates_skipped_count", s.duplicatesSkippedCount)
         put("passthrough_count", s.passthroughCount)
+        put("quarantined_total", s.quarantinedCount)
         put("total_orig_bytes", s.totalOrigBytes)
         put("total_out_bytes", s.totalOutBytes)
         put("total_saved_bytes", s.totalSavedBytes)

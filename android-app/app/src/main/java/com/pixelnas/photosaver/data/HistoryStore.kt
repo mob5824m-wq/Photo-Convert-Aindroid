@@ -6,13 +6,14 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.pixelnas.photosaver.model.ConversionRecord
 import com.pixelnas.photosaver.model.HistorySummary
+import com.pixelnas.photosaver.model.QuarantineItem
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.round
 
 class HistoryStore(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "pixel_nas_history.db", null, 2) {
+    SQLiteOpenHelper(context.applicationContext, "pixel_nas_history.db", null, 3) {
 
     private val _recentFlow = MutableStateFlow<List<ConversionRecord>>(emptyList())
     val recentFlow: StateFlow<List<ConversionRecord>> = _recentFlow.asStateFlow()
@@ -33,6 +34,7 @@ class HistoryStore(context: Context) :
                 output_filename TEXT NOT NULL,
                 media_type TEXT NOT NULL,
                 mode TEXT NOT NULL,
+                profile_name TEXT DEFAULT 'default',
                 orig_width INTEGER DEFAULT 0,
                 orig_height INTEGER DEFAULT 0,
                 orig_mp REAL DEFAULT 0.0,
@@ -65,6 +67,17 @@ class HistoryStore(context: Context) :
             )
             """.trimIndent()
         )
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS quarantine_items (
+                quarantine_name TEXT PRIMARY KEY,
+                original_rel_path TEXT NOT NULL,
+                attempts INTEGER DEFAULT 2,
+                error_reason TEXT DEFAULT '',
+                quarantined_at REAL NOT NULL
+            )
+            """.trimIndent()
+        )
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -79,6 +92,23 @@ class HistoryStore(context: Context) :
                     sha256 TEXT PRIMARY KEY,
                     output_filename TEXT NOT NULL,
                     created_at REAL NOT NULL
+                )
+                """.trimIndent()
+            )
+        }
+        if (oldVersion < 3) {
+            try {
+                db.execSQL("ALTER TABLE conversion_history ADD COLUMN profile_name TEXT DEFAULT 'default'")
+            } catch (_: Exception) {
+            }
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS quarantine_items (
+                    quarantine_name TEXT PRIMARY KEY,
+                    original_rel_path TEXT NOT NULL,
+                    attempts INTEGER DEFAULT 2,
+                    error_reason TEXT DEFAULT '',
+                    quarantined_at REAL NOT NULL
                 )
                 """.trimIndent()
             )
@@ -109,12 +139,67 @@ class HistoryStore(context: Context) :
     }
 
     @Synchronized
+    fun recordQuarantine(
+        quarantineName: String,
+        originalRelPath: String,
+        attempts: Int,
+        errorReason: String
+    ) {
+        val cv = ContentValues().apply {
+            put("quarantine_name", quarantineName)
+            put("original_rel_path", originalRelPath)
+            put("attempts", attempts)
+            put("error_reason", errorReason)
+            put("quarantined_at", System.currentTimeMillis() / 1000.0)
+        }
+        writableDatabase.insertWithOnConflict(
+            "quarantine_items",
+            null,
+            cv,
+            SQLiteDatabase.CONFLICT_REPLACE
+        )
+        refreshFlows()
+    }
+
+    @Synchronized
+    fun getQuarantineMeta(quarantineName: String): QuarantineItem? {
+        readableDatabase.rawQuery(
+            "SELECT quarantine_name, original_rel_path, attempts, error_reason, quarantined_at FROM quarantine_items WHERE quarantine_name = ? LIMIT 1",
+            arrayOf(quarantineName)
+        ).use { c ->
+            if (c.moveToFirst()) {
+                return QuarantineItem(
+                    quarantineName = c.getString(0),
+                    originalRelPath = c.getString(1),
+                    attempts = c.getInt(2),
+                    errorReason = c.getString(3) ?: "",
+                    quarantinedAtEpochSec = c.getDouble(4)
+                )
+            }
+        }
+        return null
+    }
+
+    @Synchronized
+    fun removeQuarantineMeta(quarantineName: String) {
+        writableDatabase.delete("quarantine_items", "quarantine_name = ?", arrayOf(quarantineName))
+        refreshFlows()
+    }
+
+    @Synchronized
+    fun clearQuarantineMeta() {
+        writableDatabase.delete("quarantine_items", null, null)
+        refreshFlows()
+    }
+
+    @Synchronized
     fun record(entry: ConversionRecord): Long {
         val cv = ContentValues().apply {
             put("original_filename", entry.originalFilename)
             put("output_filename", entry.outputFilename)
             put("media_type", entry.mediaType)
             put("mode", entry.mode)
+            put("profile_name", entry.profileName)
             put("orig_width", entry.origWidth)
             put("orig_height", entry.origHeight)
             put("orig_mp", entry.origMp)
@@ -168,6 +253,10 @@ class HistoryStore(context: Context) :
 
     @Synchronized
     fun summary(): HistorySummary {
+        var qCount = 0
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM quarantine_items", null).use { qc ->
+            if (qc.moveToFirst()) qCount = qc.getInt(0)
+        }
         readableDatabase.rawQuery(
             """
             SELECT
@@ -193,6 +282,7 @@ class HistoryStore(context: Context) :
                     saverCount = c.getInt(1),
                     duplicatesSkippedCount = c.getInt(2),
                     passthroughCount = c.getInt(3),
+                    quarantinedCount = qCount,
                     totalOrigBytes = orig,
                     totalOutBytes = c.getLong(5),
                     totalSavedBytes = saved,
@@ -201,7 +291,7 @@ class HistoryStore(context: Context) :
                 )
             }
         }
-        return HistorySummary()
+        return HistorySummary(quarantinedCount = qCount)
     }
 
     @Synchronized
@@ -216,31 +306,35 @@ class HistoryStore(context: Context) :
         _summaryFlow.value = summary()
     }
 
-    private fun android.database.Cursor.toRecord(): ConversionRecord = ConversionRecord(
-        id = getLong(getColumnIndexOrThrow("id")),
-        originalFilename = getString(getColumnIndexOrThrow("original_filename")),
-        outputFilename = getString(getColumnIndexOrThrow("output_filename")),
-        mediaType = getString(getColumnIndexOrThrow("media_type")),
-        mode = getString(getColumnIndexOrThrow("mode")),
-        origWidth = getInt(getColumnIndexOrThrow("orig_width")),
-        origHeight = getInt(getColumnIndexOrThrow("orig_height")),
-        origMp = getDouble(getColumnIndexOrThrow("orig_mp")),
-        origBytes = getLong(getColumnIndexOrThrow("orig_bytes")),
-        outWidth = getInt(getColumnIndexOrThrow("out_width")),
-        outHeight = getInt(getColumnIndexOrThrow("out_height")),
-        outMp = getDouble(getColumnIndexOrThrow("out_mp")),
-        outBytes = getLong(getColumnIndexOrThrow("out_bytes")),
-        savedBytes = getLong(getColumnIndexOrThrow("saved_bytes")),
-        savedPct = getDouble(getColumnIndexOrThrow("saved_pct")),
-        exifPreserved = getInt(getColumnIndexOrThrow("exif_preserved")) == 1,
-        cameraModel = getString(getColumnIndexOrThrow("camera_model")) ?: "",
-        dateTaken = getString(getColumnIndexOrThrow("date_taken")) ?: "",
-        gpsCoords = getString(getColumnIndexOrThrow("gps_coords")) ?: "",
-        metadataNote = getString(getColumnIndexOrThrow("metadata_note")) ?: "",
-        originalDeleted = getInt(getColumnIndexOrThrow("original_deleted")) == 1,
-        durationMs = getLong(getColumnIndexOrThrow("duration_ms")),
-        status = getString(getColumnIndexOrThrow("status")) ?: "completed",
-        errorMessage = getString(getColumnIndexOrThrow("error_message")) ?: "",
-        createdAtEpochSec = getDouble(getColumnIndexOrThrow("created_at"))
-    )
+    private fun android.database.Cursor.toRecord(): ConversionRecord {
+        val profIdx = getColumnIndex("profile_name")
+        return ConversionRecord(
+            id = getLong(getColumnIndexOrThrow("id")),
+            originalFilename = getString(getColumnIndexOrThrow("original_filename")),
+            outputFilename = getString(getColumnIndexOrThrow("output_filename")),
+            mediaType = getString(getColumnIndexOrThrow("media_type")),
+            mode = getString(getColumnIndexOrThrow("mode")),
+            profileName = if (profIdx >= 0) (getString(profIdx) ?: "default") else "default",
+            origWidth = getInt(getColumnIndexOrThrow("orig_width")),
+            origHeight = getInt(getColumnIndexOrThrow("orig_height")),
+            origMp = getDouble(getColumnIndexOrThrow("orig_mp")),
+            origBytes = getLong(getColumnIndexOrThrow("orig_bytes")),
+            outWidth = getInt(getColumnIndexOrThrow("out_width")),
+            outHeight = getInt(getColumnIndexOrThrow("out_height")),
+            outMp = getDouble(getColumnIndexOrThrow("out_mp")),
+            outBytes = getLong(getColumnIndexOrThrow("out_bytes")),
+            savedBytes = getLong(getColumnIndexOrThrow("saved_bytes")),
+            savedPct = getDouble(getColumnIndexOrThrow("saved_pct")),
+            exifPreserved = getInt(getColumnIndexOrThrow("exif_preserved")) == 1,
+            cameraModel = getString(getColumnIndexOrThrow("camera_model")) ?: "",
+            dateTaken = getString(getColumnIndexOrThrow("date_taken")) ?: "",
+            gpsCoords = getString(getColumnIndexOrThrow("gps_coords")) ?: "",
+            metadataNote = getString(getColumnIndexOrThrow("metadata_note")) ?: "",
+            originalDeleted = getInt(getColumnIndexOrThrow("original_deleted")) == 1,
+            durationMs = getLong(getColumnIndexOrThrow("duration_ms")),
+            status = getString(getColumnIndexOrThrow("status")) ?: "completed",
+            errorMessage = getString(getColumnIndexOrThrow("error_message")) ?: "",
+            createdAtEpochSec = getDouble(getColumnIndexOrThrow("created_at"))
+        )
+    }
 }

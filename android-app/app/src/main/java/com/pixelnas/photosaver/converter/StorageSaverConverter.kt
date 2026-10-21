@@ -68,7 +68,7 @@ object StorageSaverConverter {
     )
 
     private val FILENAME_DATE_REGEXES = listOf(
-        Regex("""(?:IMG|VID|PXL|DSC|MVIMG|Screenshot|Signal)[_-]?(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})""", RegexOption.IGNORE_CASE),
+        Regex("""(?:IMG|VID|PXL|SAM|DSC|MVIMG|Screenshot|Signal)[_-]?(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})""", RegexOption.IGNORE_CASE),
         Regex("""WhatsApp\s+(?:Image|Video)\s+(\d{4})-(\d{2})-(\d{2})\s+at\s+(\d{1,2})\.(\d{2})\.(\d{2})""", RegexOption.IGNORE_CASE),
         Regex("""(20\d{2}|19\d{2})[-_](\d{2})[-_](\d{2})[\s_T-]+(\d{2})[.:_-](\d{2})[.:_-](\d{2})"""),
         Regex("""(20\d{2}|19\d{2})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})""")
@@ -194,6 +194,25 @@ object StorageSaverConverter {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
+    private fun verifySourceIntegrities(sourceFile: File, ext: String) {
+        val size = sourceFile.length()
+        if (size <= 0L) {
+            throw IllegalStateException("Corrupted or empty transfer (0 bytes): ${sourceFile.name}")
+        }
+        if (ext in PHOTO_EXTENSIONS) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(sourceFile.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                throw IllegalStateException("Corrupted or truncated photo stream: ${sourceFile.name}")
+            }
+        } else if (ext in VIDEO_EXTENSIONS) {
+            val (vw, vh) = probeVideoDimensions(sourceFile)
+            if (vw <= 0 || vh <= 0) {
+                throw IllegalStateException("Corrupted or unreadable video container: ${sourceFile.name}")
+            }
+        }
+    }
+
     suspend fun processFile(
         context: Context,
         sourceFile: File,
@@ -206,23 +225,45 @@ object StorageSaverConverter {
         }
 
         val incomingRoot = File(config.incomingDir)
-        val outputDir = File(config.outputDir).apply { mkdirs() }
+        val matchedProfile = config.matchFolderProfile(incomingRoot, sourceFile)
+        val activeProfileName = matchedProfile?.folderName ?: "default"
+        val effectiveConfig = if (matchedProfile != null) {
+            config.copy(
+                storageSaverEnabled = matchedProfile.storageSaverEnabled,
+                maxMegapixels = matchedProfile.maxMegapixels,
+                jpegQuality = matchedProfile.jpegQuality,
+                compressVideos = matchedProfile.compressVideos
+            )
+        } else {
+            config
+        }
+
+        val baseOutputRoot = File(config.outputDir).apply { mkdirs() }
+        val targetOutputDir = if (!matchedProfile?.outputSubfolder.isNullOrBlank()) {
+            File(baseOutputRoot, matchedProfile!!.outputSubfolder).apply { mkdirs() }
+        } else {
+            baseOutputRoot
+        }
+
         val origBytes = sourceFile.length()
         val ext = sourceFile.extension.lowercase()
 
-        val sidecar = if (config.mergeTakeoutJson) findSidecarJson(sourceFile) else null
+        // Verify decode health upfront so truncated/corrupted uploads quarantine reliably in every mode
+        verifySourceIntegrities(sourceFile, ext)
+
+        val sidecar = if (effectiveConfig.mergeTakeoutJson) findSidecarJson(sourceFile) else null
         val takeout = if (sidecar != null) parseTakeoutSidecar(sidecar) else SidecarMetadata()
-        val parsedFnDate = if (config.restoreExifFromFilename) parseDateFromFilename(sourceFile.name) else null
+        val parsedFnDate = if (effectiveConfig.restoreExifFromFilename) parseDateFromFilename(sourceFile.name) else null
 
         val effectiveModified = takeout.epochMillis ?: parsedFnDate?.second ?: sourceFile.lastModified()
 
         // SHA-256 duplicate shield
         val sha256 = computeSha256(sourceFile)
-        if (config.skipDuplicates && historyStore != null) {
+        if (effectiveConfig.skipDuplicates && historyStore != null) {
             val existingOut = historyStore.lookupHash(sha256)
             if (existingOut != null) {
                 var deleted = false
-                if (config.deleteOriginals) {
+                if (effectiveConfig.deleteOriginals) {
                     deleted = sourceFile.delete() || !sourceFile.exists()
                     sidecar?.delete()
                 }
@@ -231,6 +272,7 @@ object StorageSaverConverter {
                     outputFilename = existingOut,
                     mediaType = if (ext in VIDEO_EXTENSIONS) "video" else "photo",
                     mode = "duplicate_skipped",
+                    profileName = activeProfileName,
                     origBytes = origBytes,
                     outBytes = 0L,
                     savedBytes = origBytes,
@@ -243,12 +285,14 @@ object StorageSaverConverter {
         }
 
         val relPrefix = try {
-            val relParent = sourceFile.parentFile?.relativeTo(incomingRoot)?.path.orEmpty()
-            if (relParent.isNotBlank() && relParent != ".") {
-                relParent.replace(File.separatorChar, '_') + "_"
+            val relParent = sourceFile.parentFile?.relativeTo(incomingRoot)?.invariantSeparatorsPath.orEmpty()
+            val subParts = relParent.split("/").filter { it.isNotBlank() && it != "." }
+            val stripped = if (matchedProfile != null && subParts.firstOrNull().equals(matchedProfile.folderName, ignoreCase = true)) {
+                subParts.drop(1)
             } else {
-                ""
+                subParts
             }
+            if (stripped.isNotEmpty()) stripped.joinToString("_") + "_" else ""
         } catch (_: Exception) {
             ""
         }
@@ -257,35 +301,36 @@ object StorageSaverConverter {
         val result = when {
             ext in PHOTO_EXTENSIONS -> processPhoto(
                 sourceFile = sourceFile,
-                outputDir = outputDir,
+                outputDir = targetOutputDir,
                 outputStem = outputStem,
                 origBytes = origBytes,
                 effectiveModified = effectiveModified,
                 takeout = takeout,
                 fallbackFilenameExifDate = parsedFnDate?.first,
-                config = config
+                config = effectiveConfig
             )
             ext in VIDEO_EXTENSIONS -> processVideo(
                 context = context,
                 sourceFile = sourceFile,
-                outputDir = outputDir,
+                outputDir = targetOutputDir,
                 outputStem = outputStem,
                 origBytes = origBytes,
                 effectiveModified = effectiveModified,
-                config = config
+                config = effectiveConfig
             )
             else -> throw IllegalArgumentException("Unsupported format: .$ext")
         }
 
-        val outFile = File(outputDir, result.outputFilename)
+        val outFile = File(targetOutputDir, result.outputFilename)
         if (!outFile.isFile || outFile.length() <= 0L) {
             throw IllegalStateException("Output verification failed; keeping original safe in Incoming.")
         }
 
-        historyStore?.recordHash(sha256, outFile.name)
+        val relOutputName = outFile.relativeTo(baseOutputRoot).invariantSeparatorsPath
+        historyStore?.recordHash(sha256, relOutputName)
 
         var deleted = false
-        if (config.deleteOriginals && sourceFile.exists()) {
+        if (effectiveConfig.deleteOriginals && sourceFile.exists()) {
             deleted = sourceFile.delete() || !sourceFile.exists()
             sidecar?.delete()
         }
@@ -299,6 +344,8 @@ object StorageSaverConverter {
 
         val elapsed = System.currentTimeMillis() - startMs
         result.copy(
+            outputFilename = relOutputName,
+            profileName = activeProfileName,
             originalDeleted = deleted,
             durationMs = elapsed
         )
@@ -684,10 +731,12 @@ object StorageSaverConverter {
         incomingDir.mkdirs()
         val created = mutableListOf<String>()
         val specs = listOf(
-            Triple("IMG_24MP_Sample_LakeLouise.jpg", 6000 to 4000, Color.rgb(29, 78, 137)),
-            Triple("WhatsApp Image 2023-07-19 at 18.45.12.jpg", 5184 to 3888, Color.rgb(16, 124, 92))
+            Triple(File(incomingDir, "StorageSaver/PXL_24MP_Pixel9Pro_Sample.jpg"), 6000 to 4000, Color.rgb(29, 78, 137)),
+            Triple(File(incomingDir, "Original/SAM_24MP_GalaxyS24Ultra.jpg"), 6000 to 4000, Color.rgb(15, 118, 110)),
+            Triple(File(incomingDir, "Family/WhatsApp Image 2023-07-19 at 18.45.12.jpg"), 5184 to 3888, Color.rgb(16, 124, 92))
         )
-        for ((name, dims, baseColor) in specs) {
+        for ((dest, dims, baseColor) in specs) {
+            dest.parentFile?.mkdirs()
             val bmp = Bitmap.createBitmap(dims.first, dims.second, Bitmap.Config.RGB_565)
             val canvas = Canvas(bmp)
             canvas.drawColor(baseColor)
@@ -695,23 +744,38 @@ object StorageSaverConverter {
                 color = Color.WHITE
                 textSize = 140f
             }
-            canvas.drawText("Pixel Photo NAS Sample ${dims.first}x${dims.second}", 160f, 360f, paint)
-            val tmp = File(incomingDir, ".tmp_${UUID.randomUUID()}.jpg")
-            val dest = File(incomingDir, name)
+            canvas.drawText("Pixel Photo NAS Android ${dims.first}x${dims.second}", 160f, 360f, paint)
+            val tmp = File(dest.parentFile, ".tmp_${UUID.randomUUID()}.jpg")
             FileOutputStream(tmp).use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
             bmp.recycle()
-            if (!name.startsWith("WhatsApp")) {
+            if (!dest.name.startsWith("WhatsApp")) {
                 ExifInterface(tmp.absolutePath).apply {
-                    setAttribute(ExifInterface.TAG_MAKE, "Google")
-                    setAttribute(ExifInterface.TAG_MODEL, "Pixel 9 Pro Sample")
+                    setAttribute(ExifInterface.TAG_MAKE, if (dest.name.startsWith("SAM")) "Samsung" else "Google")
+                    setAttribute(ExifInterface.TAG_MODEL, if (dest.name.startsWith("SAM")) "Galaxy S24 Ultra" else "Pixel 9 Pro")
                     setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, "2026:10:20 16:30:00")
                     saveAttributes()
                 }
             }
             tmp.renameTo(dest)
-            created.add(dest.name)
+            created.add(dest.relativeTo(incomingDir).invariantSeparatorsPath)
         }
         return created
+    }
+
+    fun seedCorruptedTransfer(incomingDir: File): String {
+        val saverDir = File(incomingDir, "StorageSaver").apply { mkdirs() }
+        val target = File(saverDir, "CORRUPT_Incomplete_Upload_PXL_20261021.jpg")
+        val corruptedBytes = ByteArray(1400) { idx ->
+            when (idx) {
+                0 -> 0xFF.toByte()
+                1 -> 0xD8.toByte()
+                2 -> 0xFF.toByte()
+                3 -> 0xE0.toByte()
+                else -> 0x5A.toByte()
+            }
+        }
+        target.writeBytes(corruptedBytes)
+        return target.relativeTo(incomingDir).invariantSeparatorsPath
     }
 
     private fun uniqueOutputFile(dir: File, stem: String, suffix: String): File {
@@ -726,6 +790,6 @@ object StorageSaverConverter {
 
     private fun roundMp(w: Int, h: Int): Double {
         if (w <= 0 || h <= 0) return 0.0
-        return round(((w.toLong() * h.toLong()).toDouble() / 1_000_000.0) * 100.0) / 100.0
+        return round(((w.toLong() * h.toLong()).toDouble() / 1_000_000.0) * 100.0) / 10.0.let { it / 10.0 }
     }
 }

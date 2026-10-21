@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
 
 import qrcode
 import uvicorn
@@ -17,7 +18,12 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 
-from server.config import PIXEL_PROFILES, SettingsManager, get_lan_ips
+from server.config import (
+    PIXEL_PROFILES,
+    SettingsManager,
+    get_lan_ips,
+    sanitize_folder_segment,
+)
 from server.converter import (
     PHOTO_EXTENSIONS,
     VIDEO_EXTENSIONS,
@@ -26,9 +32,9 @@ from server.converter import (
     is_supported_media,
 )
 from server.database import HistoryDatabase
-from server.demo_media import generate_sample_batch
+from server.demo_media import generate_sample_batch, seed_corrupted_transfer
 from server.ftp_server import EmbeddedFtpServer
-from server.watcher import PipelineWorker
+from server.watcher import PipelineWorker, iter_incoming_media, iter_output_media
 from server.webdav import create_webdav_router
 
 
@@ -48,7 +54,7 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
 
     app = FastAPI(
         title="Pixel Photo NAS (Google Photos Storage Saver Relay)",
-        version="1.0.0",
+        version="1.2.0",
         lifespan=lifespan,
     )
     app.state.settings_mgr = settings_mgr
@@ -64,7 +70,6 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Mount full RFC 4918 WebDAV endpoint at /webdav
     app.include_router(create_webdav_router(settings_mgr, worker))
 
     def _folder_path(folder: str) -> Path:
@@ -73,19 +78,23 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
             return inc_dir
         if folder == "output":
             return out_dir
-        raise HTTPException(status_code=400, detail="folder must be 'incoming' or 'output'")
+        if folder == "quarantine":
+            return settings_mgr.quarantine_path()
+        raise HTTPException(
+            status_code=400, detail="folder must be 'incoming', 'output', or 'quarantine'"
+        )
 
     @app.get("/api/status")
     def get_status(request: Request):
         cfg = settings_mgr.get()
         inc_dir, out_dir = settings_mgr.ensure_directories()
+        quar_dir = settings_mgr.quarantine_path()
         disk = shutil.disk_usage(out_dir)
 
-        inc_files = [
-            p for p in inc_dir.iterdir() if p.is_file() and not p.name.startswith(".")
-        ]
-        out_files = [
-            p for p in out_dir.iterdir() if p.is_file() and not p.name.startswith(".")
+        inc_files = list(iter_incoming_media(inc_dir, cfg.recursive_subfolders))
+        out_files = list(iter_output_media(out_dir))
+        quar_files = [
+            p for p in quar_dir.iterdir() if p.is_file() and not p.name.startswith(".")
         ]
 
         lan_ips = get_lan_ips()
@@ -97,7 +106,7 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
 
         return {
             "app_name": "Pixel Photo NAS",
-            "version": "1.0.0",
+            "version": "1.2.0",
             "settings": cfg.sanitized_dict(),
             "profiles": PIXEL_PROFILES,
             "worker": worker.status(),
@@ -114,6 +123,11 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
                     "file_count": len(out_files),
                     "total_bytes": sum(p.stat().st_size for p in out_files),
                 },
+                "quarantine": {
+                    "path": str(quar_dir),
+                    "file_count": len(quar_files),
+                    "total_bytes": sum(p.stat().st_size for p in quar_files),
+                },
             },
             "storage": {
                 "total_bytes": disk.total,
@@ -126,6 +140,9 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
                 "web_ui_url": base_url,
                 "webdav_url": f"{base_url}/webdav/",
                 "webdav_incoming_url": f"{base_url}/webdav/Incoming/",
+                "webdav_saver_url": f"{base_url}/webdav/Incoming/StorageSaver/",
+                "webdav_original_url": f"{base_url}/webdav/Incoming/Original/",
+                "webdav_family_url": f"{base_url}/webdav/Incoming/Family/",
                 "ftp_enabled": ftp_server.bound_port > 0,
                 "ftp_port": ftp_server.bound_port or cfg.ftp_port,
                 "ftp_url": f"ftp://{lan_ips[0]}:{ftp_server.bound_port or cfg.ftp_port}/Incoming/",
@@ -157,39 +174,105 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
     def list_files(folder: str = Query("output", pattern="^(incoming|output)$")):
         target_dir = _folder_path(folder)
         pending = set(worker.pending_filenames())
+        file_iter = (
+            iter_incoming_media(target_dir, settings_mgr.get().recursive_subfolders)
+            if folder == "incoming"
+            else iter_output_media(target_dir)
+        )
         items = []
-        for p in sorted(
-            target_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True
-        ):
-            if not p.is_file() or p.name.startswith("."):
-                continue
-            meta = inspect_media_file(p)
+        for p in sorted(file_iter, key=lambda x: x.stat().st_mtime, reverse=True):
+            meta = inspect_media_file(p, root_dir=target_dir)
+            rel_path = meta["rel_path"]
+            enc_rel = "/".join(quote(seg) for seg in rel_path.split("/"))
             meta["folder"] = folder
             meta["is_processing"] = p.name in pending or (
                 worker.status().get("active_file") == p.name
             )
-            meta["media_url"] = f"/api/media/{folder}/{p.name}"
+            meta["media_url"] = f"/api/media/{folder}/{enc_rel}"
             meta["thumb_url"] = (
-                f"/api/thumb/{folder}/{p.name}?v={int(meta['modified_at'])}"
+                f"/api/thumb/{folder}/{enc_rel}?v={int(meta['modified_at'])}"
             )
             if folder == "output":
-                hist = db.lookup_by_output(p.name)
+                hist = db.lookup_by_output(rel_path) or db.lookup_by_output(p.name)
                 if hist:
                     meta["conversion"] = hist
             items.append(meta)
         return {"folder": folder, "path": str(target_dir), "files": items}
 
+    @app.get("/api/quarantine")
+    def list_quarantine():
+        quar_dir = settings_mgr.quarantine_path()
+        items = []
+        for p in sorted(
+            quar_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True
+        ):
+            if not p.is_file() or p.name.startswith("."):
+                continue
+            st = p.stat()
+            qmeta = db.get_quarantine_meta(p.name) or {}
+            items.append(
+                {
+                    "name": p.name,
+                    "original_rel_path": qmeta.get("original_rel_path") or p.name,
+                    "size_bytes": st.st_size,
+                    "attempts": qmeta.get("attempts", 2),
+                    "error_reason": qmeta.get(
+                        "error_reason", "Corrupted or unreadable media stream"
+                    ),
+                    "quarantined_at": qmeta.get("quarantined_at", st.st_mtime),
+                    "download_url": f"/api/media/quarantine/{quote(p.name)}",
+                }
+            )
+        return {"path": str(quar_dir), "count": len(items), "items": items}
+
+    @app.post("/api/quarantine/retry")
+    def retry_quarantine(payload: Optional[dict] = None):
+        filename = (payload or {}).get("filename")
+        if filename:
+            restored = worker.retry_quarantine_file(str(filename))
+            return {"retried": 1, "restored_to": restored}
+        count = worker.retry_all_quarantine()
+        return {"retried": count}
+
+    @app.delete("/api/quarantine/{filename}")
+    def delete_quarantine_item(filename: str):
+        quar_dir = settings_mgr.quarantine_path()
+        target = (quar_dir / Path(filename).name).resolve()
+        if target.parent != quar_dir or not target.is_file():
+            raise HTTPException(status_code=404, detail="Quarantined file not found")
+        target.unlink()
+        db.remove_quarantine_meta(target.name)
+        return {"deleted": target.name}
+
+    @app.post("/api/quarantine/clear")
+    def clear_quarantine():
+        quar_dir = settings_mgr.quarantine_path()
+        removed = 0
+        for p in quar_dir.iterdir():
+            if p.is_file() and not p.name.startswith("."):
+                p.unlink()
+                removed += 1
+        db.clear_quarantine_meta()
+        return {"deleted_count": removed}
+
     @app.post("/api/upload")
-    async def upload_media(files: List[UploadFile] = File(...)):
+    async def upload_media(
+        files: List[UploadFile] = File(...),
+        profile: str = Query(""),
+    ):
         inc_dir, _ = settings_mgr.ensure_directories()
+        clean_profile = sanitize_folder_segment(profile)
+        target_dir = (inc_dir / clean_profile) if clean_profile else inc_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+
         saved_names = []
         skipped_names = []
         for uf in files:
             safe_name = Path(uf.filename or f"upload_{uuid.uuid4().hex}.jpg").name
-            dest = inc_dir / safe_name
+            dest = target_dir / safe_name
             if dest.exists():
-                dest = inc_dir / f"{dest.stem}_{uuid.uuid4().hex[:6]}{dest.suffix}"
-            tmp = inc_dir / f".upload_{uuid.uuid4().hex}.part"
+                dest = target_dir / f"{dest.stem}_{uuid.uuid4().hex[:6]}{dest.suffix}"
+            tmp = target_dir / f".upload_{uuid.uuid4().hex}.part"
             try:
                 with tmp.open("wb") as out_f:
                     shutil.copyfileobj(uf.file, out_f, length=1024 * 1024)
@@ -199,12 +282,13 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
                     tmp.unlink(missing_ok=True)
             if is_supported_media(dest):
                 worker.enqueue_if_auto(dest)
-                saved_names.append(dest.name)
+                saved_names.append(dest.relative_to(inc_dir).as_posix())
             else:
                 skipped_names.append(dest.name)
         return {
             "uploaded": saved_names,
             "skipped": skipped_names,
+            "profile": clean_profile or "default",
             "auto_queued": settings_mgr.get().auto_watch_enabled,
         }
 
@@ -220,8 +304,12 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
     @app.post("/api/demo/seed")
     def seed_sample_media(payload: Optional[dict] = None):
         inc_dir, _ = settings_mgr.ensure_directories()
-        include_video = bool((payload or {}).get("include_video", True))
-        created = generate_sample_batch(inc_dir, include_video=include_video)
+        body = payload or {}
+        include_video = bool(body.get("include_video", True))
+        include_corrupted = bool(body.get("include_corrupted", False))
+        created = generate_sample_batch(
+            inc_dir, include_video=include_video, include_corrupted=include_corrupted
+        )
         if settings_mgr.get().auto_watch_enabled:
             worker.process_all_now()
         return {
@@ -230,24 +318,32 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
             "auto_queued": settings_mgr.get().auto_watch_enabled,
         }
 
-    @app.delete("/api/files/{folder}/{filename}")
-    def delete_media_file(folder: str, filename: str):
-        base = _folder_path(folder)
-        target = (base / Path(filename).name).resolve()
-        if target.parent != base or not target.is_file():
-            raise HTTPException(status_code=404, detail="File not found")
-        target.unlink()
-        return {"deleted": filename}
+    @app.post("/api/demo/corrupt")
+    def seed_corrupt_test():
+        inc_dir, _ = settings_mgr.ensure_directories()
+        created = seed_corrupted_transfer(inc_dir, "StorageSaver")
+        if settings_mgr.get().auto_watch_enabled:
+            worker.process_all_now()
+        return {"seeded": created}
 
     @app.post("/api/files/{folder}/clear")
     def clear_folder(folder: str):
         base = _folder_path(folder)
         removed = 0
-        for p in base.iterdir():
+        for p in list(base.rglob("*")):
             if p.is_file() and not p.name.startswith("."):
                 p.unlink()
                 removed += 1
         return {"folder": folder, "deleted_count": removed}
+
+    @app.delete("/api/files/{folder}/{filepath:path}")
+    def delete_media_file(folder: str, filepath: str):
+        base = _folder_path(folder)
+        target = (base / filepath).resolve()
+        if not str(target).startswith(str(base)) or not target.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        target.unlink()
+        return {"deleted": filepath}
 
     @app.get("/api/history")
     def get_history(limit: int = 100):
@@ -258,11 +354,11 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
         db.clear()
         return {"cleared": True}
 
-    @app.get("/api/media/{folder}/{filename}")
-    def serve_media(folder: str, filename: str):
+    @app.get("/api/media/{folder}/{filepath:path}")
+    def serve_media(folder: str, filepath: str):
         base = _folder_path(folder)
-        target = (base / Path(filename).name).resolve()
-        if target.parent != base or not target.is_file():
+        target = (base / filepath).resolve()
+        if not str(target).startswith(str(base)) or not target.is_file():
             raise HTTPException(status_code=404, detail="File not found")
         return FileResponse(path=str(target), filename=target.name)
 
@@ -272,14 +368,17 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
         ext = p.suffix.lower()
         buf = io.BytesIO()
         if ext in PHOTO_EXTENSIONS:
-            with Image.open(p) as im:
-                im = ImageOps.exif_transpose(im)
-                if im.mode != "RGB":
-                    im = im.convert("RGB")
-                im.thumbnail((520, 520), Image.Resampling.BILINEAR)
-                im.save(buf, format="JPEG", quality=80)
-                return buf.getvalue()
-        if ext in VIDEO_EXTENSIONS:
+            try:
+                with Image.open(p) as im:
+                    im = ImageOps.exif_transpose(im)
+                    if im.mode != "RGB":
+                        im = im.convert("RGB")
+                    im.thumbnail((520, 520), Image.Resampling.BILINEAR)
+                    im.save(buf, format="JPEG", quality=80)
+                    return buf.getvalue()
+            except Exception:
+                pass
+        elif ext in VIDEO_EXTENSIONS:
             ffmpeg = get_ffmpeg_binary()
             if ffmpeg:
                 import subprocess
@@ -312,11 +411,11 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
         img.save(buf, format="JPEG", quality=80)
         return buf.getvalue()
 
-    @app.get("/api/thumb/{folder}/{filename}")
-    def serve_thumbnail(folder: str, filename: str):
+    @app.get("/api/thumb/{folder}/{filepath:path}")
+    def serve_thumbnail(folder: str, filepath: str):
         base = _folder_path(folder)
-        target = (base / Path(filename).name).resolve()
-        if target.parent != base or not target.is_file():
+        target = (base / filepath).resolve()
+        if not str(target).startswith(str(base)) or not target.is_file():
             raise HTTPException(status_code=404, detail="File not found")
         st = target.stat()
         data = _render_cached_thumb(str(target), st.st_mtime_ns)

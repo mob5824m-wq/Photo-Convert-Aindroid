@@ -5,6 +5,7 @@
     status: null,
     incomingFiles: [],
     outputFiles: [],
+    quarantineItems: [],
     history: [],
     formDirty: false,
   };
@@ -32,7 +33,7 @@
     el.className = "toast";
     el.textContent = msg;
     $("toastContainer").appendChild(el);
-    setTimeout(() => el.remove(), 3400);
+    setTimeout(() => el.remove(), 3600);
   }
 
   async function api(path, opts = {}) {
@@ -42,6 +43,17 @@
       throw new Error(txt || `HTTP ${res.status}`);
     }
     return res.json();
+  }
+
+  function switchTab(tabName) {
+    document.querySelectorAll(".tab-btn").forEach((b) => {
+      const active = b.dataset.tab === tabName;
+      b.classList.toggle("active", active);
+      b.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+    const panel = $(`tab-${tabName}`);
+    if (panel) panel.classList.add("active");
   }
 
   // Theme Toggle
@@ -55,16 +67,7 @@
 
   // Tabs
   document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach((b) => {
-        b.classList.remove("active");
-        b.setAttribute("aria-selected", "false");
-      });
-      document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-      btn.classList.add("active");
-      btn.setAttribute("aria-selected", "true");
-      $(`tab-${btn.dataset.tab}`).classList.add("active");
-    });
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
   });
 
   function renderAll() {
@@ -104,16 +107,23 @@
     $("incomingPathText").textContent = st.folders.incoming.path;
     $("nomediaBadge").textContent = st.folders.incoming.nomedia_protected ? ".nomedia shielded" : "Watched";
 
+    const profileCount = (cfg.folder_profiles || []).length;
     $("modeBadge").textContent = cfg.storage_saver_enabled ? "Storage Saver ON" : "Original Pass-Through";
     $("engineSummaryLine").textContent = cfg.storage_saver_enabled
-      ? `≤${cfg.max_megapixels} MP JPEG (${cfg.jpeg_quality}%) · ${cfg.compress_videos ? `${cfg.max_video_short_side}p MP4` : "Video Direct"} · ${cfg.delete_originals ? "Delete High-Res ON" : "Keep Source"}`
-      : `Moves untouched originals to Output · ${cfg.delete_originals ? "Clears Incoming ON" : "Copies Only"}`;
+      ? `≤${cfg.max_megapixels} MP JPEG (${cfg.jpeg_quality}%) · ${profileCount} Folder Profiles · Quarantine Guard`
+      : `Original Pass-Through · ${profileCount} Folder Profiles · Quarantine Guard`;
 
     $("outputCountMetric").textContent = `${st.folders.output.file_count} ${st.folders.output.file_count === 1 ? "file" : "files"}`;
     $("totalSavedMetric").textContent = `${formatBytes(Math.max(0, stats.total_saved_bytes || 0))} freed`;
     $("savedPctBadge").textContent = `${stats.avg_saved_pct || 0}% saved`;
     $("outputPathText").textContent = st.folders.output.path;
     $("galleryTabCount").textContent = String(st.folders.output.file_count);
+
+    // Quarantine Counter
+    const qCount = state.quarantineItems.length;
+    const qBadge = $("quarantineTabCount");
+    qBadge.textContent = String(qCount);
+    qBadge.classList.toggle("tab-counter-alert", qCount > 0);
 
     // Quick Toggles
     $("toggleStorageSaver").checked = !!cfg.storage_saver_enabled;
@@ -128,10 +138,10 @@
 
     // Network Endpoints & QR
     $("endpointWebUrl").textContent = st.network.web_ui_url;
-    $("endpointWebdavUrl").textContent = st.network.webdav_incoming_url;
+    $("endpointWebdavUrl").textContent = st.network.webdav_saver_url || st.network.webdav_incoming_url;
     $("endpointFtpUrl").textContent = st.network.ftp_url;
     $("ftpBadgeStatus").textContent = st.network.ftp_enabled ? `Active · :${st.network.ftp_port}` : "Disabled";
-    $("syncIncomingInline").textContent = st.folders.incoming.path;
+    $("syncIncomingInline").textContent = `${st.folders.incoming.path}/StorageSaver`;
     $("syncOutputInline").textContent = st.folders.output.path;
     const qrSrc = `/api/qrcode?text=${encodeURIComponent(st.network.web_ui_url)}`;
     if ($("portalQrImg").dataset.src !== qrSrc) {
@@ -139,7 +149,7 @@
       $("portalQrImg").dataset.src = qrSrc;
     }
 
-    // Settings Form (only populate when user isn't actively editing)
+    // Settings Form
     if (!state.formDirty) {
       $("inputIncomingDir").value = cfg.incoming_dir;
       $("inputOutputDir").value = cfg.output_dir;
@@ -161,9 +171,61 @@
       }
     }
 
+    renderFolderProfiles(cfg.folder_profiles || []);
     renderFileLists();
     renderHistory();
     renderGallery();
+    renderQuarantine();
+  }
+
+  function renderFolderProfiles(profiles) {
+    const sel = $("uploadProfileSelect");
+    const prevVal = sel.value;
+    sel.innerHTML =
+      `<option value="">Global Default (/Incoming)</option>` +
+      profiles
+        .map((p) => {
+          const modeTxt = p.storage_saver_enabled
+            ? `≤${p.max_megapixels || 16} MP Saver`
+            : "100% Original";
+          const subTxt = p.output_subfolder ? ` → Output/${p.output_subfolder}` : "";
+          return `<option value="${escapeHtml(p.folder_name)}">${escapeHtml(p.folder_name)} (/Incoming/${escapeHtml(p.folder_name)} · ${modeTxt}${escapeHtml(subTxt)})</option>`;
+        })
+        .join("");
+    if (Array.from(sel.options).some((o) => o.value === prevVal)) {
+      sel.value = prevVal;
+    }
+
+    const listEl = $("profileRulesList");
+    if (!profiles.length) {
+      listEl.innerHTML = `<div class="empty-state">No per-folder profile overrides active.</div>`;
+      return;
+    }
+    listEl.innerHTML = profiles
+      .map((p, idx) => {
+        const badge = p.storage_saver_enabled
+          ? `<span class="badge badge-accent">Storage Saver ≤${p.max_megapixels || 16} MP</span>`
+          : `<span class="badge badge-success">Original 100%</span>`;
+        const dest = p.output_subfolder
+          ? `DCIM/PixelNAS/${escapeHtml(p.output_subfolder)}`
+          : `DCIM/PixelNAS`;
+        return `
+          <div class="profile-rule-card">
+            <div class="profile-rule-top">
+              <span class="profile-rule-path">/Incoming/${escapeHtml(p.folder_name)}/</span>
+              ${badge}
+            </div>
+            <div class="profile-rule-desc">
+              Routes to <code>${dest}</code>
+              ${p.compress_videos ? " · 1080p Video" : " · Direct Video"}
+            </div>
+            <div>
+              <button type="button" class="btn btn-ghost btn-sm remove-profile-btn" data-profile-idx="${idx}">Remove Rule</button>
+            </div>
+          </div>
+        `;
+      })
+      .join("");
   }
 
   function renderFileLists() {
@@ -177,7 +239,7 @@
           <div class="file-row" data-folder="incoming" data-idx="${idx}">
             <img class="file-thumb" src="${escapeHtml(f.thumb_url)}" alt="${escapeHtml(f.name)}" loading="lazy" />
             <div class="file-meta">
-              <div class="file-name">${escapeHtml(f.name)}</div>
+              <div class="file-name">${escapeHtml(f.rel_path || f.name)}</div>
               <div class="file-sub">
                 <span>${formatBytes(f.size_bytes)}</span>
                 ${f.width ? `<span>${f.width}×${f.height} (${f.megapixels} MP)</span>` : ""}
@@ -191,11 +253,15 @@
 
     const outEl = $("outputFileList");
     if (!state.outputFiles.length) {
-      outEl.innerHTML = `<div class="empty-state">No converted photos in Output yet. Drop files or click <strong>Drop Photos + 4K Video</strong> above!</div>`;
+      outEl.innerHTML = `<div class="empty-state">No converted photos in Output yet. Drop files or click <strong>Drop Photos + Takeout + 4K Video</strong> above!</div>`;
     } else {
       outEl.innerHTML = state.outputFiles
         .map((f, idx) => {
           const conv = f.conversion;
+          const profileTag =
+            conv && conv.profile_name && conv.profile_name !== "default"
+              ? `<span class="badge badge-accent">${escapeHtml(conv.profile_name)}</span>`
+              : "";
           const savedBadge =
             conv && conv.saved_bytes > 0
               ? `<span class="badge badge-success">-${conv.saved_pct}% (${formatBytes(conv.saved_bytes)} saved)</span>`
@@ -204,10 +270,11 @@
           <div class="file-row" data-folder="output" data-idx="${idx}">
             <img class="file-thumb" src="${escapeHtml(f.thumb_url)}" alt="${escapeHtml(f.name)}" loading="lazy" />
             <div class="file-meta">
-              <div class="file-name">${escapeHtml(f.name)}</div>
+              <div class="file-name">${escapeHtml(f.rel_path || f.name)}</div>
               <div class="file-sub">
                 <span>${formatBytes(f.size_bytes)}</span>
                 ${f.width ? `<span>${f.width}×${f.height} (${f.megapixels} MP)</span>` : ""}
+                ${profileTag}
                 ${savedBadge}
               </div>
             </div>
@@ -225,14 +292,20 @@
     }
     tbody.innerHTML = state.history
       .map((h) => {
+        const profBadge =
+          h.profile_name && h.profile_name !== "default"
+            ? `<span class="badge badge-neutral">${escapeHtml(h.profile_name)}</span> `
+            : "";
         const modeLabel =
           h.mode === "storage_saver"
-            ? `<span class="badge badge-accent">Storage Saver</span>`
+            ? `${profBadge}<span class="badge badge-accent">Storage Saver</span>`
             : h.mode === "duplicate_skipped"
-            ? `<span class="badge badge-neutral">Duplicate Skipped</span>`
+            ? `${profBadge}<span class="badge badge-neutral">Duplicate Skipped</span>`
+            : h.mode === "quarantined"
+            ? `<span class="badge" style="color:var(--danger)">Quarantined</span>`
             : h.mode === "error"
             ? `<span class="badge" style="color:var(--danger)">Error</span>`
-            : `<span class="badge badge-neutral">Original</span>`;
+            : `${profBadge}<span class="badge badge-success">Original</span>`;
         const metaParts = [];
         if (h.metadata_note) {
           metaParts.push(`<span class="badge badge-accent">${escapeHtml(h.metadata_note)}</span>`);
@@ -246,9 +319,9 @@
           <td>${modeLabel}</td>
           <td>${h.orig_width ? `${h.orig_width}×${h.orig_height} (${h.orig_mp} MP) · ` : ""}${formatBytes(h.orig_bytes)}</td>
           <td>${h.out_width ? `${h.out_width}×${h.out_height} (${h.out_mp} MP) · ` : ""}${formatBytes(h.out_bytes)}</td>
-          <td><span class="badge badge-success">${h.saved_bytes >= 0 ? `-${h.saved_pct}% (${formatBytes(h.saved_bytes)})` : formatBytes(h.saved_bytes)}</span></td>
-          <td>${metaParts.length ? metaParts.join(" · ") : (h.exif_preserved ? "Timestamps Kept" : "—")}</td>
-          <td>${h.original_deleted ? "✓ Deleted" : "Kept"}</td>
+          <td><span class="badge badge-success">${h.saved_bytes > 0 ? `-${h.saved_pct}% (${formatBytes(h.saved_bytes)})` : "0 B (Untouched)"}</span></td>
+          <td>${metaParts.length ? metaParts.join(" · ") : (h.exif_preserved ? "Timestamps Kept" : escapeHtml(h.error_message || "—"))}</td>
+          <td>${h.original_deleted ? "✓ Deleted" : "Isolated"}</td>
         </tr>`;
       })
       .join("");
@@ -267,7 +340,7 @@
         <div class="gallery-card" data-folder="output" data-idx="${idx}">
           <img class="gallery-thumb" src="${escapeHtml(f.thumb_url)}" alt="${escapeHtml(f.name)}" loading="lazy" />
           <div class="gallery-card-body">
-            <div class="gallery-card-title">${escapeHtml(f.name)}</div>
+            <div class="gallery-card-title">${escapeHtml(f.rel_path || f.name)}</div>
             <div class="gallery-card-stats">
               <span>${f.width ? `${f.width}×${f.height}` : f.media_type.toUpperCase()} · ${formatBytes(f.size_bytes)}</span>
               ${conv && conv.saved_bytes > 0 ? `<span class="badge badge-success">-${conv.saved_pct}%</span>` : ""}
@@ -278,12 +351,45 @@
       .join("");
   }
 
+  function renderQuarantine() {
+    const el = $("quarantineList");
+    if (!state.quarantineItems.length) {
+      el.innerHTML = `<div class="empty-state">No corrupted transfers in Quarantine — pipeline is 100% healthy!</div>`;
+      return;
+    }
+    el.innerHTML = state.quarantineItems
+      .map(
+        (q) => `
+        <div class="quarantine-row">
+          <div class="file-meta">
+            <div class="file-name">${escapeHtml(q.name)}</div>
+            <div class="file-sub">
+              <span>Original path: <code>Incoming/${escapeHtml(q.original_rel_path)}</code></span>
+              <span>· ${formatBytes(q.size_bytes)}</span>
+              <span>· ${q.attempts} failed attempts</span>
+            </div>
+            <div class="file-sub" style="color:var(--danger);margin-top:3px;">
+              Reason: ${escapeHtml(q.error_reason)}
+            </div>
+          </div>
+          <div class="quarantine-actions">
+            <button class="btn btn-primary btn-sm retry-quarantine-btn" data-qname="${escapeHtml(q.name)}">Retry</button>
+            <a class="btn btn-secondary btn-sm" href="${escapeHtml(q.download_url)}" download="${escapeHtml(q.name)}">Inspect Bytes</a>
+            <button class="btn btn-danger btn-sm delete-quarantine-btn" data-qname="${escapeHtml(q.name)}">Delete</button>
+          </div>
+        </div>
+      `
+      )
+      .join("");
+  }
+
   function openInspector(folder, idx) {
     const list = folder === "incoming" ? state.incomingFiles : state.outputFiles;
     const item = list[idx];
     if (!item) return;
     const conv = item.conversion;
-    $("modalTitle").textContent = item.name;
+    const relPath = item.rel_path || item.name;
+    $("modalTitle").textContent = relPath;
     const mediaPreview =
       item.media_type === "video"
         ? `<video class="inspector-preview" src="${escapeHtml(item.media_url)}" controls preload="metadata"></video>`
@@ -294,7 +400,7 @@
       <div class="inspector-grid">
         <div class="inspector-stat">
           <span>Current File Size (${folder === "output" ? "Folder 2 Output" : "Folder 1 Incoming"})</span>
-          <strong>${formatBytes(item.size_bytes)}</strong>
+          <strong>${formatBytes(item.size_bytes)}${conv && conv.profile_name ? ` · Profile: ${escapeHtml(conv.profile_name)}` : ""}</strong>
         </div>
         <div class="inspector-stat">
           <span>Output Resolution</span>
@@ -337,9 +443,10 @@
     const delBtn = $("modalDeleteBtn");
     if (delBtn) {
       delBtn.onclick = async () => {
-        await api(`/api/files/${folder}/${encodeURIComponent(item.name)}`, { method: "DELETE" });
+        const encPath = relPath.split("/").map(encodeURIComponent).join("/");
+        await api(`/api/files/${folder}/${encPath}`, { method: "DELETE" });
         $("inspectorModal").hidden = true;
-        toast(`Deleted ${item.name}`);
+        toast(`Deleted ${relPath}`);
         await refreshData();
       };
     }
@@ -351,16 +458,16 @@
         await api("/api/process", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ filename: item.name }),
+          body: JSON.stringify({ filename: relPath }),
         });
         $("inspectorModal").hidden = true;
-        toast(`Converted ${item.name} → Output folder`);
+        toast(`Processed ${relPath}`);
         await refreshData();
       };
     }
   }
 
-  document.body.addEventListener("click", (e) => {
+  document.body.addEventListener("click", async (e) => {
     const row = e.target.closest(".file-row, .gallery-card");
     if (row) {
       openInspector(row.dataset.folder, Number(row.dataset.idx));
@@ -370,6 +477,33 @@
     if (copyBtn) {
       const txt = $(copyBtn.dataset.copyTarget).textContent;
       navigator.clipboard.writeText(txt).then(() => toast("Copied URL to clipboard"));
+      return;
+    }
+    const remProfBtn = e.target.closest(".remove-profile-btn");
+    if (remProfBtn && state.status) {
+      const idx = Number(remProfBtn.dataset.profileIdx);
+      const next = (state.status.settings.folder_profiles || []).filter((_, i) => i !== idx);
+      await patchSettings({ folder_profiles: next }, "Removed folder profile rule");
+      return;
+    }
+    const retryBtn = e.target.closest(".retry-quarantine-btn");
+    if (retryBtn) {
+      const qname = retryBtn.dataset.qname;
+      await api("/api/quarantine/retry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: qname }),
+      });
+      toast(`Moved ${qname} back to Incoming for retry`);
+      await refreshData();
+      return;
+    }
+    const delQBtn = e.target.closest(".delete-quarantine-btn");
+    if (delQBtn) {
+      const qname = delQBtn.dataset.qname;
+      await api(`/api/quarantine/${encodeURIComponent(qname)}`, { method: "DELETE" });
+      toast(`Deleted ${qname} from Quarantine`);
+      await refreshData();
     }
   });
 
@@ -388,21 +522,51 @@
     await refreshData();
   }
 
+  // Add Per-Folder Profile Rule
+  $("addProfileForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!state.status) return;
+    const folderRaw = $("newProfileFolder").value.trim().replace(/[^A-Za-z0-9._-]/g, "");
+    if (!folderRaw) {
+      toast("Enter a valid folder name");
+      return;
+    }
+    const isSaver = $("newProfileMode").value === "saver";
+    const outSub = $("newProfileOutSub").value.trim().replace(/[^A-Za-z0-9._/-]/g, "");
+    const existing = (state.status.settings.folder_profiles || []).filter(
+      (p) => p.folder_name.toLowerCase() !== folderRaw.toLowerCase()
+    );
+    existing.push({
+      folder_name: folderRaw,
+      storage_saver_enabled: isSaver,
+      max_megapixels: 16.0,
+      jpeg_quality: 85,
+      compress_videos: isSaver,
+      output_subfolder: outSub,
+    });
+    $("newProfileFolder").value = "";
+    $("newProfileOutSub").value = "";
+    await patchSettings(
+      { folder_profiles: existing },
+      `Added /Incoming/${folderRaw}/ folder rule`
+    );
+  });
+
   $("deviceProfileSelect").addEventListener("change", async (e) => {
     const profile = e.target.value;
     const saverRecommended = profile !== "pixel_1";
     await patchSettings(
       { device_profile: profile, storage_saver_enabled: saverRecommended },
       saverRecommended
-        ? "Switched to Unlimited Storage Saver mode (≤16 MP)"
-        : "Switched to Pixel 1 Original Quality mode (toggle Saver back ON anytime to save local disk)"
+        ? "Switched default to Unlimited Storage Saver mode (≤16 MP)"
+        : "Switched default to Pixel 1 Original Quality mode"
     );
   });
 
   $("toggleStorageSaver").addEventListener("change", (e) =>
     patchSettings(
       { storage_saver_enabled: e.target.checked },
-      e.target.checked ? "Storage Saver conversion enabled" : "Direct pass-through enabled"
+      e.target.checked ? "Global Storage Saver enabled" : "Global Original pass-through enabled"
     )
   );
   $("toggleDeleteOriginals").addEventListener("change", (e) =>
@@ -420,7 +584,7 @@
   $("toggleAutoWatch").addEventListener("change", (e) =>
     patchSettings(
       { auto_watch_enabled: e.target.checked },
-      e.target.checked ? "Auto-watch active — processing Incoming files" : "Auto-watch paused — files will wait in Incoming"
+      e.target.checked ? "Auto-watch active — processing Incoming files" : "Auto-watch paused"
     )
   );
   if ($("toggleSmartMetadata")) {
@@ -438,7 +602,7 @@
     );
   }
 
-  // Drag & Drop + File Upload with real XHR progress bar
+  // Drag & Drop + File Upload with Target Profile Routing
   const dropzone = $("uploadDropzone");
   const fileInput = $("fileInput");
   dropzone.addEventListener("click", () => fileInput.click());
@@ -460,15 +624,19 @@
   function uploadFiles(fileList) {
     const fd = new FormData();
     Array.from(fileList).forEach((f) => fd.append("files", f));
+    const chosenProfile = $("uploadProfileSelect").value || "";
     const wrap = $("uploadProgressWrap");
     const fill = $("uploadProgressFill");
     const label = $("uploadProgressLabel");
     wrap.hidden = false;
     fill.style.width = "0%";
-    label.textContent = `Uploading ${fileList.length} file(s)...`;
+    label.textContent = `Uploading ${fileList.length} file(s)${chosenProfile ? ` to /Incoming/${chosenProfile}` : ""}...`;
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "/api/upload");
+    const url = chosenProfile
+      ? `/api/upload?profile=${encodeURIComponent(chosenProfile)}`
+      : "/api/upload";
+    xhr.open("POST", url);
     xhr.upload.onprogress = (ev) => {
       if (ev.lengthComputable) {
         const pct = Math.round((ev.loaded / ev.total) * 100);
@@ -479,7 +647,9 @@
     xhr.onload = async () => {
       wrap.hidden = true;
       if (xhr.status >= 200 && xhr.status < 300) {
-        toast(`Uploaded ${fileList.length} file(s) to Incoming`);
+        toast(
+          `Uploaded ${fileList.length} file(s) to Incoming${chosenProfile ? `/${chosenProfile}` : ""}`
+        );
         await refreshData();
       } else {
         toast(`Upload failed: ${xhr.responseText}`);
@@ -496,14 +666,14 @@
     const btn = includeVideo ? $("seedAllBtn") : $("seedPhotosBtn");
     const origText = btn.textContent;
     btn.disabled = true;
-    btn.textContent = "Generating high-res media...";
+    btn.textContent = "Generating Android media...";
     try {
       const res = await api("/api/demo/seed", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ include_video: includeVideo }),
       });
-      toast(`Dropped ${res.count} high-res files into Incoming!`);
+      toast(`Dropped ${res.count} Android camera files across StorageSaver/, Original/ & Family/!`);
       await refreshData();
     } catch (err) {
       toast(`Error: ${err.message}`);
@@ -513,8 +683,38 @@
     }
   }
 
+  async function triggerCorruptDemo() {
+    try {
+      const res = await api("/api/demo/corrupt", { method: "POST" });
+      toast(`Dropped corrupted file (${res.seeded}) — isolating to Quarantine after 2 retries!`);
+      switchTab("quarantine");
+      setTimeout(refreshData, 600);
+      setTimeout(refreshData, 1800);
+    } catch (err) {
+      toast(`Error: ${err.message}`);
+    }
+  }
+
   $("seedPhotosBtn").addEventListener("click", () => seedDemo(false));
   $("seedAllBtn").addEventListener("click", () => seedDemo(true));
+  $("seedCorruptBtn").addEventListener("click", triggerCorruptDemo);
+  $("testCorruptTabBtn").addEventListener("click", triggerCorruptDemo);
+
+  $("retryAllQuarantineBtn").addEventListener("click", async () => {
+    const res = await api("/api/quarantine/retry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    toast(`Moved ${res.retried} file(s) back to Incoming for retry`);
+    await refreshData();
+  });
+
+  $("clearQuarantineBtn").addEventListener("click", async () => {
+    const res = await api("/api/quarantine/clear", { method: "POST" });
+    toast(`Cleared ${res.deleted_count} file(s) from Quarantine`);
+    await refreshData();
+  });
 
   $("processNowBtn").addEventListener("click", async () => {
     const res = await api("/api/process", {
@@ -577,15 +777,17 @@
 
   async function refreshData() {
     try {
-      const [status, inc, out, hist] = await Promise.all([
+      const [status, inc, out, quar, hist] = await Promise.all([
         api("/api/status"),
         api("/api/files?folder=incoming"),
         api("/api/files?folder=output"),
+        api("/api/quarantine"),
         api("/api/history?limit=50"),
       ]);
       state.status = status;
       state.incomingFiles = inc.files || [];
       state.outputFiles = out.files || [];
+      state.quarantineItems = quar.items || [];
       state.history = hist.items || [];
       renderAll();
     } catch (err) {

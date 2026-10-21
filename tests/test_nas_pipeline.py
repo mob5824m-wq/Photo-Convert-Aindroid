@@ -12,7 +12,7 @@ from PIL import Image
 from server.converter import compute_target_dimensions, inspect_media_file
 from server.demo_media import generate_sample_batch
 from server.main import create_app
-from server.watcher import enforce_output_retention
+from server.watcher import enforce_output_retention, iter_incoming_media, iter_output_media
 
 
 def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.2) -> bool:
@@ -25,7 +25,7 @@ def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.2) -> bool
 
 
 def test_storage_saver_dimension_math():
-    w, h, resized = compute_target_dimensions(8000, 6000, 16.0)
+    w, h, resized = compute_target_dimensions(8160, 6120, 16.0)
     assert resized is True
     assert w * h <= 16_000_000
     assert (w, h) == (4618, 3464)
@@ -35,56 +35,127 @@ def test_storage_saver_dimension_math():
     assert (w2, h2) == (4032, 3024)
 
 
-def test_end_to_end_camera_whatsapp_takeout_video_and_cleanup(tmp_path: Path):
+def test_per_folder_profiles_whatsapp_takeout_video_and_cleanup(tmp_path: Path):
     app = create_app(data_dir=tmp_path / "nas_data")
     with TestClient(app) as client:
         st = client.get("/api/status").json()
         inc_dir = Path(st["folders"]["incoming"]["path"])
         out_dir = Path(st["folders"]["output"]["path"])
+        quar_dir = Path(st["folders"]["quarantine"]["path"])
         assert (inc_dir / ".nomedia").exists()
+        assert (quar_dir / ".nomedia").exists()
         assert not (out_dir / ".nomedia").exists()
 
         client.post("/api/settings", json={"auto_watch_enabled": False, "ftp_port": 0})
         seeded = generate_sample_batch(inc_dir, include_video=True)
-        assert len(seeded) == 5  # 48MP, 24MP Portrait, WhatsApp, Takeout+JSON, 4K Video
+        assert len(seeded) == 5
 
         client.post("/api/settings", json={"auto_watch_enabled": True})
 
         assert _wait_until(
-            lambda: len([p for p in inc_dir.iterdir() if not p.name.startswith(".")]) == 0
-            and len([p for p in out_dir.iterdir() if not p.name.startswith(".")]) == 5,
+            lambda: len(list(iter_incoming_media(inc_dir, True))) == 0
+            and len(list(iter_output_media(out_dir))) == 5,
             timeout=35.0,
         )
 
-        # Ensure high-res originals AND Takeout .json sidecars in Incoming were deleted
-        assert [p.name for p in inc_dir.iterdir()] == [".nomedia"]
+        # Profile folders themselves stay ready for future uploads while empty ad-hoc subfolders get pruned
+        assert (inc_dir / "StorageSaver").is_dir()
+        assert (inc_dir / "Original").is_dir()
+        assert (inc_dir / "Family").is_dir()
 
-        # 1. Verify 48MP iPhone sample shrunk <= 16MP + Apple EXIF & GPS intact
-        lake_meta = inspect_media_file(out_dir / "IMG_48MP_iPhone16Pro_LakeLouise.jpg")
-        assert lake_meta["width"] * lake_meta["height"] <= 16_000_000
-        assert "iPhone 16 Pro" in lake_meta["camera_model"]
-        assert lake_meta["date_taken"] == "2026:08:14 17:42:19"
-        assert "51.4167" in lake_meta["gps_coords"]
+        # 1. StorageSaver/ profile shrunk 50MP Pixel 9 Pro photo <= 16MP + Google EXIF & GPS intact
+        pixel_meta = inspect_media_file(
+            out_dir / "PXL_50MP_Pixel9Pro_LakeLouise.jpg", root_dir=out_dir
+        )
+        assert pixel_meta["width"] * pixel_meta["height"] <= 16_000_000
+        assert "Pixel 9 Pro" in pixel_meta["camera_model"]
+        assert pixel_meta["date_taken"] == "2026:08:14 17:42:19"
+        assert "51.4167" in pixel_meta["gps_coords"]
 
-        # 2. Verify 24MP Portrait sample with Orientation=6 normalized upright + Sony EXIF intact
-        sony_meta = inspect_media_file(out_dir / "DSC_24MP_SonyA7IV_Portrait_Shibuya.jpg")
-        assert sony_meta["width"] < sony_meta["height"]
-        assert "ILCE-7M4" in sony_meta["camera_model"]
+        # 2. Original/ profile preserved full 24MP Samsung Galaxy S24 Ultra resolution untouched!
+        sam_meta = inspect_media_file(
+            out_dir / "SAM_24MP_GalaxyS24Ultra_Portrait.jpg", root_dir=out_dir
+        )
+        assert sam_meta["width"] * sam_meta["height"] == 24_000_000
+        assert "SM-S928B" in sam_meta["camera_model"]
 
-        # 3. Verify WhatsApp stripped-EXIF image had its true 2023 EXIF DateTimeOriginal restored!
-        wa_meta = inspect_media_file(out_dir / "WhatsApp Image 2023-07-19 at 18.45.12.jpg")
+        # 3. Family/ profile shrunk photo <= 16MP, restored WhatsApp EXIF date, AND routed to Output/Family/!
+        wa_meta = inspect_media_file(
+            out_dir / "Family" / "WhatsApp Image 2023-07-19 at 18.45.12.jpg",
+            root_dir=out_dir,
+        )
+        assert wa_meta["width"] * wa_meta["height"] <= 16_000_000
         assert wa_meta["date_taken"] == "2023:07:19 18:45:12"
 
-        # 4. Verify Google Takeout .json sidecar merged GPS + timestamp directly into EXIF!
-        takeout_meta = inspect_media_file(out_dir / "Takeout_KyotoFushimiInari_50MP.jpg")
+        # 4. Google Takeout .json sidecar merged GPS + timestamp directly into EXIF!
+        takeout_meta = inspect_media_file(
+            out_dir / "Takeout_KyotoFushimiInari_50MP.jpg", root_dir=out_dir
+        )
         assert takeout_meta["width"] * takeout_meta["height"] <= 16_000_000
         assert "34.9671" in takeout_meta["gps_coords"]
         assert "135.7727" in takeout_meta["gps_coords"]
         assert takeout_meta["date_taken"].startswith("2024:04:")
 
-        # 5. Verify 4K video downscaled cleanly to 1920x1080 MP4
-        vid_meta = inspect_media_file(out_dir / "VID_4K_UHD_2160p_SampleClip.mp4")
+        # 5. 4K video downscaled cleanly to 1920x1080 MP4
+        vid_meta = inspect_media_file(
+            out_dir / "VID_4K_UHD_2160p_SampleClip.mp4", root_dir=out_dir
+        )
         assert (vid_meta["width"], vid_meta["height"]) == (1920, 1080)
+
+
+def test_quarantine_corrupted_transfers_and_widget_profile_upload(tmp_path: Path):
+    app = create_app(data_dir=tmp_path / "nas_quarantine")
+    with TestClient(app) as client:
+        client.post("/api/settings", json={"ftp_enabled": False})
+        st = client.get("/api/status").json()
+        inc_dir = Path(st["folders"]["incoming"]["path"])
+        out_dir = Path(st["folders"]["output"]["path"])
+        quar_dir = Path(st["folders"]["quarantine"]["path"])
+
+        # Simulate a half-transferred/corrupted JPEG landing in Incoming/StorageSaver
+        res = client.post("/api/demo/corrupt")
+        assert res.status_code == 200
+
+        # Watcher retries twice and isolates the broken file into Quarantine/ automatically!
+        assert _wait_until(
+            lambda: client.get("/api/quarantine").json()["count"] == 1
+            and len(list(iter_incoming_media(inc_dir, True))) == 0,
+            timeout=15.0,
+        )
+        q_item = client.get("/api/quarantine").json()["items"][0]
+        assert q_item["attempts"] >= 2
+        assert q_item["original_rel_path"].startswith("StorageSaver/")
+        assert (quar_dir / q_item["name"]).is_file()
+
+        # Verify subsequent healthy upload via Android Home Screen Widget API (?profile=Family) never stalls!
+        buf = io.BytesIO()
+        Image.new("RGB", (5000, 4000), (45, 130, 195)).save(buf, format="JPEG", quality=92)
+        up = client.post(
+            "/api/upload?profile=Family",
+            files=[("files", ("PXL_20261021_120000.jpg", buf.getvalue(), "image/jpeg"))],
+        )
+        assert up.status_code == 200
+        assert up.json()["profile"] == "Family"
+        assert _wait_until(
+            lambda: (out_dir / "Family" / "PXL_20261021_120000.jpg").is_file(),
+            timeout=12.0,
+        )
+
+        # Repair the quarantined file in-place & trigger Retry -> converts cleanly to Output!
+        repaired_buf = io.BytesIO()
+        Image.new("RGB", (4800, 3600), (20, 150, 100)).save(
+            repaired_buf, format="JPEG", quality=90
+        )
+        (quar_dir / q_item["name"]).write_bytes(repaired_buf.getvalue())
+        retry_res = client.post(
+            "/api/quarantine/retry", json={"filename": q_item["name"]}
+        ).json()
+        assert retry_res["retried"] == 1
+        assert _wait_until(
+            lambda: client.get("/api/quarantine").json()["count"] == 0
+            and (out_dir / Path(q_item["name"]).stem).with_suffix(".jpg").is_file(),
+            timeout=12.0,
+        )
 
 
 def test_sha256_dedup_recursive_subfolders_and_retention(tmp_path: Path):
@@ -95,7 +166,6 @@ def test_sha256_dedup_recursive_subfolders_and_retention(tmp_path: Path):
         inc_dir = Path(st["folders"]["incoming"]["path"])
         out_dir = Path(st["folders"]["output"]["path"])
 
-        # Drop high-res photo inside a nested album subfolder
         album_dir = inc_dir / "Iceland2025"
         album_dir.mkdir(parents=True)
         buf = io.BytesIO()
@@ -107,10 +177,8 @@ def test_sha256_dedup_recursive_subfolders_and_retention(tmp_path: Path):
             lambda: (out_dir / "Iceland2025_IMG_20250615_143022.jpg").is_file(),
             timeout=12.0,
         )
-        # Empty subfolder in Incoming auto-cleaned!
         assert _wait_until(lambda: not album_dir.exists(), timeout=6.0)
 
-        # Drop exact same bytes again under a different filename -> SHA-256 dedup skips re-encode!
         dup_path = inc_dir / "reupload_copy.jpg"
         dup_path.write_bytes(payload)
         assert _wait_until(lambda: not dup_path.exists(), timeout=10.0)
@@ -118,11 +186,9 @@ def test_sha256_dedup_recursive_subfolders_and_retention(tmp_path: Path):
         summary = client.get("/api/history").json()["summary"]
         assert summary["duplicates_skipped_count"] == 1
 
-        # Test auto-purge retention cleanup for files older than N days
         target_out = out_dir / "Iceland2025_IMG_20250615_143022.jpg"
         old_ts = time.time() - (20 * 86400)
         os.utime(target_out, (old_ts, old_ts))
-        # Set ctime fallback via retention=0 vs 14 days if ctime is recent -> test min_free_gb FIFO eviction
         removed = enforce_output_retention(out_dir, retention_days=0, min_free_gb=999999.0)
         assert removed == 1
         assert not target_out.exists()
@@ -155,12 +221,11 @@ def test_passthrough_and_webdav_ftp_protocols(tmp_path: Path):
         assert _wait_until(lambda: (out_dir / "pixel1_fullres.jpg").is_file(), timeout=10.0)
         assert (out_dir / "pixel1_fullres.jpg").stat().st_size == len(orig_payload)
 
-        # Turn Storage Saver back ON and test WebDAV + FTP
         client.post("/api/settings", json={"storage_saver_enabled": True})
 
         dav_buf = io.BytesIO()
         Image.new("RGB", (5200, 3900), (180, 70, 90)).save(dav_buf, format="PNG")
-        assert client.put("/webdav/Incoming/webdav_20mp.png", content=dav_buf.getvalue()).status_code in (201, 204)
+        assert client.put("/webdav/Incoming/StorageSaver/webdav_20mp.png", content=dav_buf.getvalue()).status_code in (201, 204)
         assert _wait_until(lambda: (out_dir / "webdav_20mp.jpg").is_file(), timeout=12.0)
 
         ftp_buf = io.BytesIO()
@@ -169,7 +234,7 @@ def test_passthrough_and_webdav_ftp_protocols(tmp_path: Path):
         with ftplib.FTP() as ftp:
             ftp.connect("127.0.0.1", ftp_port, timeout=5)
             ftp.login("pixel", "pixel")
-            ftp.cwd("Incoming")
+            ftp.cwd("Incoming/StorageSaver")
             ftp.storbinary("STOR ftp_20mp_camera.jpg", ftp_buf)
 
         assert _wait_until(lambda: (out_dir / "ftp_20mp_camera.jpg").is_file(), timeout=12.0)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime as dt_mod
 import hashlib
 import json
@@ -23,7 +24,7 @@ try:
 except Exception:
     pass
 
-from server.config import NasSettings
+from server.config import NasSettings, sanitize_folder_segment
 from server.database import HistoryDatabase
 
 PHOTO_EXTENSIONS = {
@@ -59,10 +60,9 @@ IGNORED_SUFFIXES = {
     ".json",
 }
 
-# Matches common smartphone camera, WhatsApp, Messenger, Signal, and Screenshot filenames
 FILENAME_DATE_PATTERNS = [
     re.compile(
-        r"(?:IMG|VID|PXL|DSC|MVIMG|Screenshot|Signal)[_-]?(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})",
+        r"(?:IMG|VID|PXL|DSC|MVIMG|SAM|Screenshot|Signal)[_-]?(\d{4})(\d{2})(\d{2})[_-](\d{2})(\d{2})(\d{2})",
         re.IGNORECASE,
     ),
     re.compile(
@@ -100,10 +100,6 @@ def compute_file_sha256(path: Path) -> str:
 
 
 def parse_datetime_from_filename(filename: str) -> Optional[Tuple[str, float]]:
-    """
-    Parse historical date/time from WhatsApp, Screenshot, PXL_, IMG_, or archive filenames.
-    Returns ('YYYY:MM:DD HH:MM:SS', unix_timestamp) if valid.
-    """
     stem = Path(filename).stem
     for pat in FILENAME_DATE_PATTERNS:
         m = pat.search(stem)
@@ -121,7 +117,6 @@ def parse_datetime_from_filename(filename: str) -> Optional[Tuple[str, float]]:
 
 
 def find_takeout_sidecar(media_path: Path) -> Optional[Path]:
-    """Locate companion Google Takeout JSON sidecar file if present."""
     candidates = [
         media_path.parent / f"{media_path.name}.json",
         media_path.parent / f"{media_path.name}.supplemental-metadata.json",
@@ -134,7 +129,6 @@ def find_takeout_sidecar(media_path: Path) -> Optional[Path]:
 
 
 def read_takeout_sidecar(sidecar_path: Path) -> Dict:
-    """Extract timestamp & non-zero GPS coordinates from a Google Takeout sidecar JSON."""
     extracted: Dict = {}
     try:
         raw = json.loads(sidecar_path.read_text(encoding="utf-8", errors="ignore"))
@@ -181,7 +175,6 @@ def is_supported_media(path: Path) -> bool:
 def compute_target_dimensions(
     width: int, height: int, max_megapixels: float = 16.0
 ) -> Tuple[int, int, bool]:
-    """Compute Google Photos Storage Saver target dimensions (width * height <= max_mp)."""
     if width <= 0 or height <= 0:
         return max(1, width), max(1, height), False
     max_pixels = int(round(max_megapixels * 1_000_000))
@@ -274,10 +267,6 @@ def build_enriched_exif_bytes(
     takeout_meta: Dict,
     fallback_dt_str: Optional[str],
 ) -> Tuple[Optional[bytes], str]:
-    """
-    Preserve full EXIF camera/date/GPS tags AND automatically backfill missing timestamps/GPS
-    from Google Takeout JSON sidecars or filename patterns (WhatsApp, Screenshots, etc.).
-    """
     notes = []
     try:
         exif_dict = (
@@ -370,7 +359,6 @@ def resolve_unique_output_path(output_dir: Path, stem: str, suffix: str) -> Path
 
 
 def trigger_android_media_scan(file_path: Path) -> None:
-    """When run inside Android / Termux, notify MediaStore so Google Photos detects the new file immediately."""
     scanner = shutil.which("termux-media-scan")
     if scanner:
         try:
@@ -401,11 +389,17 @@ def trigger_android_media_scan(file_path: Path) -> None:
             pass
 
 
-def inspect_media_file(path: Path) -> Dict:
+def inspect_media_file(path: Path, root_dir: Optional[Path] = None) -> Dict:
     stat = path.stat()
     ext = path.suffix.lower()
+    rel_name = (
+        path.relative_to(root_dir).as_posix()
+        if root_dir and str(path).startswith(str(root_dir))
+        else path.name
+    )
     info = {
         "name": path.name,
+        "rel_path": rel_name,
         "size_bytes": stat.st_size,
         "modified_at": stat.st_mtime,
         "media_type": "video" if ext in VIDEO_EXTENSIONS else "photo",
@@ -452,27 +446,56 @@ def process_media_file(
     db: Optional[HistoryDatabase] = None,
 ) -> Dict:
     """
-    Atomically deduplicate, enrich metadata (Takeout JSON + filename dates), convert/move `source_path`
-    into `settings.output_dir`, verify integrity, and delete the high-res original + sidecar.
+    Resolve Per-Folder Profile (/Incoming/StorageSaver, /Incoming/Original, /Incoming/<Family>),
+    verify decode health, deduplicate via SHA-256, merge Takeout JSON / filename dates,
+    convert or pass through into Output (or Output/<Subfolder>), and delete high-res original.
     """
     t0 = time.perf_counter()
     if not source_path.is_file():
         raise FileNotFoundError(f"Source file missing: {source_path}")
 
     incoming_root = Path(settings.incoming_dir).expanduser().resolve()
-    output_dir = Path(settings.output_dir).expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    base_output_dir = Path(settings.output_dir).expanduser().resolve()
+
+    # Check if file arrived inside a configured Per-Folder Profile (/Incoming/<Profile>/...)
+    effective_settings = copy.deepcopy(settings)
+    profile_name = ""
+    rel_parts: Tuple[str, ...] = ()
+    try:
+        rel_parent = source_path.parent.resolve().relative_to(incoming_root)
+        if str(rel_parent) != ".":
+            rel_parts = rel_parent.parts
+    except ValueError:
+        rel_parts = ()
+
+    remaining_album_parts = rel_parts
+    if rel_parts:
+        matched_prof = settings.match_folder_profile(rel_parts[0])
+        if matched_prof is not None:
+            profile_name = str(matched_prof["name"])
+            effective_settings.storage_saver_enabled = (
+                matched_prof.get("mode") != "original_passthrough"
+            )
+            out_sub = sanitize_folder_segment(str(matched_prof.get("output_subfolder", "")))
+            if out_sub:
+                effective_settings.output_dir = str(base_output_dir / out_sub)
+            remaining_album_parts = rel_parts[1:]
+
+    target_output_dir = Path(effective_settings.output_dir).expanduser().resolve()
+    target_output_dir.mkdir(parents=True, exist_ok=True)
 
     orig_stat = source_path.stat()
     orig_bytes = orig_stat.st_size
     effective_mtime = orig_stat.st_mtime
     ext = source_path.suffix.lower()
 
-    sidecar_path = find_takeout_sidecar(source_path) if settings.merge_takeout_json else None
+    sidecar_path = (
+        find_takeout_sidecar(source_path) if effective_settings.merge_takeout_json else None
+    )
     takeout_meta = read_takeout_sidecar(sidecar_path) if sidecar_path else {}
     parsed_fn = (
         parse_datetime_from_filename(source_path.name)
-        if settings.restore_exif_from_filename
+        if effective_settings.restore_exif_from_filename
         else None
     )
     if takeout_meta.get("timestamp"):
@@ -480,13 +503,22 @@ def process_media_file(
     elif parsed_fn:
         effective_mtime = parsed_fn[1]
 
+    # Validate file integrity FIRST so corrupted transfers go to Quarantine instead of seen_hashes!
+    if ext in PHOTO_EXTENSIONS:
+        with Image.open(source_path) as check_src:
+            check_src.load()
+    elif ext in VIDEO_EXTENSIONS and get_ffmpeg_binary() is not None:
+        vw, vh, _ = probe_video_info(source_path)
+        if vw <= 0 or vh <= 0:
+            raise ValueError(f"Corrupted or unreadable video stream in {source_path.name}")
+
     # Compute SHA-256 content hash for zero-duplicate protection
     file_hash = compute_file_sha256(source_path)
-    if settings.skip_duplicates and db is not None:
+    if effective_settings.skip_duplicates and db is not None:
         existing_out = db.lookup_hash(file_hash)
         if existing_out:
             deleted = False
-            if settings.delete_originals:
+            if effective_settings.delete_originals:
                 source_path.unlink(missing_ok=True)
                 if sidecar_path and sidecar_path.exists():
                     sidecar_path.unlink(missing_ok=True)
@@ -494,9 +526,10 @@ def process_media_file(
             return {
                 "original_filename": source_path.name,
                 "output_filename": existing_out,
-                "output_path": str(output_dir / existing_out),
+                "output_path": str(base_output_dir / existing_out),
                 "media_type": "video" if ext in VIDEO_EXTENSIONS else "photo",
                 "mode": "duplicate_skipped",
+                "profile_name": profile_name,
                 "orig_width": 0,
                 "orig_height": 0,
                 "orig_mp": 0.0,
@@ -518,39 +551,33 @@ def process_media_file(
                 "created_at": time.time(),
             }
 
-    # Build output stem (optionally prefixed with subfolder album name when dropped recursively)
     output_stem = source_path.stem
-    if settings.prefix_subfolder_name:
-        try:
-            rel_parent = source_path.parent.resolve().relative_to(incoming_root)
-            if str(rel_parent) != ".":
-                prefix = "_".join(rel_parent.parts)
-                output_stem = f"{prefix}_{output_stem}"
-        except ValueError:
-            pass
+    if effective_settings.prefix_subfolder_name and remaining_album_parts:
+        prefix = "_".join(remaining_album_parts)
+        output_stem = f"{prefix}_{output_stem}"
 
     if ext in PHOTO_EXTENSIONS:
         result = _process_photo(
             source_path=source_path,
-            output_dir=output_dir,
+            output_dir=target_output_dir,
             output_stem=output_stem,
             orig_bytes=orig_bytes,
             effective_mtime=effective_mtime,
             takeout_meta=takeout_meta,
             fallback_dt_str=parsed_fn[0] if parsed_fn else None,
-            settings=settings,
+            settings=effective_settings,
         )
     elif ext in VIDEO_EXTENSIONS:
         result = _process_video(
             source_path=source_path,
-            output_dir=output_dir,
+            output_dir=target_output_dir,
             output_stem=output_stem,
             orig_bytes=orig_bytes,
             effective_mtime=effective_mtime,
             metadata_note="Takeout Date" if takeout_meta.get("timestamp") else (
                 "Filename Date" if parsed_fn else ""
             ),
-            settings=settings,
+            settings=effective_settings,
         )
     else:
         raise ValueError(f"Unsupported file format: {ext}")
@@ -559,11 +586,19 @@ def process_media_file(
     if not output_file.is_file() or output_file.stat().st_size == 0:
         raise RuntimeError("Output verification failed; keeping original safe in Incoming.")
 
+    rel_out_name = (
+        output_file.relative_to(base_output_dir).as_posix()
+        if str(output_file).startswith(str(base_output_dir))
+        else output_file.name
+    )
+    result["output_filename"] = rel_out_name
+    result["profile_name"] = profile_name
+
     if db is not None:
-        db.record_hash(file_hash, output_file.name)
+        db.record_hash(file_hash, rel_out_name)
 
     original_deleted = False
-    if settings.delete_originals and source_path.exists():
+    if effective_settings.delete_originals and source_path.exists():
         source_path.unlink()
         if sidecar_path and sidecar_path.exists():
             sidecar_path.unlink(missing_ok=True)

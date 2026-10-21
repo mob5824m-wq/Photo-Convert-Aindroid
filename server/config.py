@@ -1,13 +1,37 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
+import re
 import socket
 import subprocess
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List
+
+
+DEFAULT_FOLDER_PROFILES: List[Dict] = [
+    {
+        "name": "StorageSaver",
+        "mode": "storage_saver",
+        "output_subfolder": "",
+        "description": "Shrinks >16 MP photos to 16 MP JPEG (85%) & >1080p video to 1080p MP4, deletes full-res originals.",
+    },
+    {
+        "name": "Original",
+        "mode": "original_passthrough",
+        "output_subfolder": "",
+        "description": "Keeps 100% full-resolution originals untouched in Output and removes staging copies.",
+    },
+    {
+        "name": "Family",
+        "mode": "storage_saver",
+        "output_subfolder": "Family",
+        "description": "Converts to Storage Saver and saves into dedicated Output/Family device folder.",
+    },
+]
 
 
 PIXEL_PROFILES: Dict[str, dict] = {
@@ -18,7 +42,7 @@ PIXEL_PROFILES: Dict[str, dict] = {
         "android_versions": "Android 8.0 – 10 (API 26–29)",
         "google_photos_tier": "Unlimited Original Quality",
         "recommended_saver": False,
-        "notes": "Pixel 1 backs up unlimited Original Quality forever. Enable Storage Saver only if you want smaller local files on the 32GB/128GB internal storage before cloud sync.",
+        "notes": "Pixel 1 backs up unlimited Original Quality forever. Drop files in /Incoming/Original or toggle Storage Saver ON to save local 32GB/128GB space.",
     },
     "pixel_2": {
         "id": "pixel_2",
@@ -27,7 +51,7 @@ PIXEL_PROFILES: Dict[str, dict] = {
         "android_versions": "Android 8.0 – 11 (API 26–30)",
         "google_photos_tier": "Unlimited Storage Saver",
         "recommended_saver": True,
-        "notes": "Unlimited free Storage Saver backups (16MP photos / 1080p video). Pre-converting frees up up to 90% of local storage before Google Photos syncs.",
+        "notes": "Unlimited free Storage Saver backups (16MP photos / 1080p video). Pre-converting frees up to 90% of local storage before Google Photos syncs.",
     },
     "pixel_3": {
         "id": "pixel_3",
@@ -36,7 +60,7 @@ PIXEL_PROFILES: Dict[str, dict] = {
         "android_versions": "Android 9 – 12 (API 28–31)",
         "google_photos_tier": "Unlimited Storage Saver",
         "recommended_saver": True,
-        "notes": "Unlimited free Storage Saver backups. Pre-converting prevents 48MP/50MP RAW+JPEG bursts from filling 64GB storage.",
+        "notes": "Unlimited free Storage Saver backups. Pre-converting prevents 50MP–200MP Android bursts from filling 64GB storage.",
     },
     "pixel_4": {
         "id": "pixel_4",
@@ -45,7 +69,7 @@ PIXEL_PROFILES: Dict[str, dict] = {
         "android_versions": "Android 10 – 13 (API 29–33)",
         "google_photos_tier": "Unlimited Storage Saver",
         "recommended_saver": True,
-        "notes": "6GB RAM & fast UFS storage make 48MP/50MP photo & 4K->1080p video conversion smooth and cool.",
+        "notes": "6GB RAM & fast UFS storage make 50MP photo & 4K->1080p video conversion smooth and cool.",
     },
     "pixel_5": {
         "id": "pixel_5",
@@ -57,6 +81,11 @@ PIXEL_PROFILES: Dict[str, dict] = {
         "notes": "Last Google Pixel line with unlimited free Storage Saver backups. 8GB RAM + 128GB storage makes an ideal 24/7 home photo NAS.",
     },
 }
+
+
+def sanitize_folder_segment(raw: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", (raw or "").strip())
+    return cleaned.strip(". /\\")
 
 
 def detect_runtime_root() -> Path:
@@ -103,6 +132,8 @@ class NasSettings:
     prefix_subfolder_name: bool = True
     restore_exif_from_filename: bool = True
     merge_takeout_json: bool = True
+    quarantine_enabled: bool = True
+    quarantine_max_retries: int = 2
     auto_purge_output_days: int = 0
     min_free_storage_gb: float = 0.0
     max_megapixels: float = 16.0
@@ -111,6 +142,10 @@ class NasSettings:
     thermal_limit_celsius: float = 41.0
     incoming_dir: str = ""
     output_dir: str = ""
+    quarantine_dir: str = ""
+    folder_profiles: List[Dict] = field(
+        default_factory=lambda: copy.deepcopy(DEFAULT_FOLDER_PROFILES)
+    )
     ftp_enabled: bool = True
     ftp_port: int = 2121
     auth_enabled: bool = False
@@ -124,6 +159,15 @@ class NasSettings:
         )
         return data
 
+    def match_folder_profile(self, subfolder_name: str) -> Dict | None:
+        needle = (subfolder_name or "").strip().lower()
+        if not needle:
+            return None
+        for prof in self.folder_profiles:
+            if str(prof.get("name", "")).strip().lower() == needle:
+                return prof
+        return None
+
 
 class SettingsManager:
     def __init__(self, base_dir: Path | None = None) -> None:
@@ -134,6 +178,7 @@ class SettingsManager:
         self.db_file = self.base_dir / "history.db"
 
         default_incoming = self.base_dir / "Incoming"
+        default_quarantine = self.base_dir / "Quarantine"
         android_dcim = Path("/storage/emulated/0/DCIM/PixelNAS")
         if android_dcim.parent.is_dir() and os.access(android_dcim.parent, os.W_OK):
             default_output = android_dcim
@@ -143,8 +188,12 @@ class SettingsManager:
         self._settings = NasSettings(
             incoming_dir=str(default_incoming),
             output_dir=str(default_output),
+            quarantine_dir=str(default_quarantine),
         )
         self._load()
+        if not self._settings.quarantine_dir:
+            self._settings.quarantine_dir = str(default_quarantine)
+            self._save()
         self.ensure_directories()
 
     def _load(self) -> None:
@@ -169,29 +218,52 @@ class SettingsManager:
         with self._lock:
             inc = Path(self._settings.incoming_dir).expanduser().resolve()
             out = Path(self._settings.output_dir).expanduser().resolve()
+            quar = Path(
+                self._settings.quarantine_dir or (self.base_dir / "Quarantine")
+            ).expanduser().resolve()
             if inc == out:
                 out = inc.parent / "GooglePhotos_Output"
                 self._settings.output_dir = str(out)
                 self._save()
             inc.mkdir(parents=True, exist_ok=True)
             out.mkdir(parents=True, exist_ok=True)
-            # Protect Incoming folder with .nomedia so Google Photos on Android never
-            # prematurely backs up temporary full-resolution uploads before conversion!
-            nomedia_inc = inc / ".nomedia"
-            if not nomedia_inc.exists():
-                nomedia_inc.write_text("", encoding="utf-8")
-            # Never keep a .nomedia marker inside Output so Google Photos detects converted files.
+            quar.mkdir(parents=True, exist_ok=True)
+
+            # Shield Incoming & Quarantine with .nomedia so Google Photos never scans raw/corrupt files
+            for shielded in (inc, quar):
+                nomedia = shielded / ".nomedia"
+                if not nomedia.exists():
+                    nomedia.write_text("", encoding="utf-8")
+
+            # Ensure all configured Per-Folder Profile directories exist inside Incoming & Output
+            for prof in self._settings.folder_profiles:
+                pname = sanitize_folder_segment(prof.get("name", ""))
+                if pname:
+                    (inc / pname).mkdir(parents=True, exist_ok=True)
+                out_sub = sanitize_folder_segment(prof.get("output_subfolder", ""))
+                if out_sub:
+                    sub_dir = out / out_sub
+                    sub_dir.mkdir(parents=True, exist_ok=True)
+                    nm = sub_dir / ".nomedia"
+                    if nm.exists():
+                        nm.unlink(missing_ok=True)
+
             nomedia_out = out / ".nomedia"
             if nomedia_out.exists():
-                try:
-                    nomedia_out.unlink()
-                except OSError:
-                    pass
+                nomedia_out.unlink(missing_ok=True)
             return inc, out
+
+    def quarantine_path(self) -> Path:
+        with self._lock:
+            p = Path(
+                self._settings.quarantine_dir or (self.base_dir / "Quarantine")
+            ).expanduser().resolve()
+            p.mkdir(parents=True, exist_ok=True)
+            return p
 
     def get(self) -> NasSettings:
         with self._lock:
-            return NasSettings(**asdict(self._settings))
+            return copy.deepcopy(self._settings)
 
     def update(self, patch: dict) -> NasSettings:
         with self._lock:
@@ -205,6 +277,46 @@ class SettingsManager:
                     value = max(40, min(98, int(value)))
                 elif key == "max_video_short_side":
                     value = int(value)
+                elif key == "quarantine_max_retries":
+                    value = max(1, min(5, int(value)))
+                elif key == "auto_purge_output_days":
+                    value = max(0, min(3650, int(value)))
+                elif key == "min_free_storage_gb":
+                    value = max(0.0, min(500.0, float(value)))
+                elif key == "folder_profiles" and isinstance(value, list):
+                    normalized = []
+                    seen_names = set()
+                    for item in value:
+                        if not isinstance(item, dict):
+                            continue
+                        nm = sanitize_folder_segment(str(item.get("name", "")))
+                        if not nm or nm.lower() in seen_names:
+                            continue
+                        seen_names.add(nm.lower())
+                        mode = (
+                            "original_passthrough"
+                            if item.get("mode") == "original_passthrough"
+                            else "storage_saver"
+                        )
+                        out_sub = sanitize_folder_segment(
+                            str(item.get("output_subfolder", ""))
+                        )
+                        desc = str(item.get("description", "")).strip() or (
+                            f"{'Original Quality' if mode == 'original_passthrough' else 'Storage Saver (≤16 MP)'}"
+                            + (f" → Output/{out_sub}" if out_sub else " → Output")
+                        )
+                        normalized.append(
+                            {
+                                "name": nm,
+                                "mode": mode,
+                                "output_subfolder": out_sub,
+                                "description": desc,
+                            }
+                        )
+                    if normalized:
+                        value = normalized
+                    else:
+                        continue
                 elif key == "device_profile":
                     if str(value) not in PIXEL_PROFILES:
                         continue

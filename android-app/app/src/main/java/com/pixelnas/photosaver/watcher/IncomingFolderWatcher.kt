@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 class IncomingFolderWatcher(
@@ -35,6 +36,7 @@ class IncomingFolderWatcher(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val channel = Channel<File>(Channel.UNLIMITED)
     private val queuedPaths = ConcurrentHashMap.newKeySet<String>()
+    private val failureCounts = ConcurrentHashMap<String, Int>()
 
     private var workerJob: Job? = null
     private var sweeperJob: Job? = null
@@ -58,6 +60,7 @@ class IncomingFolderWatcher(
                     if (file.isFile && waitUntilFileStable(file)) {
                         val cfg = prefs.current
                         val rec = StorageSaverConverter.processFile(context, file, cfg, historyStore)
+                        failureCounts.remove(pathKey)
                         historyStore.record(rec)
                         if (cfg.deleteOriginals) {
                             pruneEmptySubfolders(File(cfg.incomingDir))
@@ -66,23 +69,41 @@ class IncomingFolderWatcher(
                         onStatsChanged()
                     }
                 } catch (e: Exception) {
-                    val errMsg = e.message ?: "Conversion error"
-                    _state.update { it.copy(lastError = "${file.name}: $errMsg") }
-                    historyStore.record(
-                        ConversionRecord(
-                            originalFilename = file.name,
-                            outputFilename = "",
-                            mediaType = "photo",
-                            mode = "error",
-                            origBytes = if (file.exists()) file.length() else 0L,
-                            outBytes = 0L,
-                            savedBytes = 0L,
-                            savedPct = 0.0,
-                            originalDeleted = false,
-                            status = "error",
-                            errorMessage = errMsg
-                        )
-                    )
+                    val errMsg = e.message ?: "Corrupted or unreadable media stream"
+                    val attempts = (failureCounts[pathKey] ?: 0) + 1
+                    failureCounts[pathKey] = attempts
+                    val cfg = prefs.current
+                    if (cfg.quarantineEnabled && file.exists() && attempts >= cfg.quarantineMaxRetries) {
+                        val origSize = file.length()
+                        val quarDest = moveToQuarantine(file, attempts, errMsg)
+                        failureCounts.remove(pathKey)
+                        if (quarDest != null) {
+                            _state.update {
+                                it.copy(
+                                    quarantinedTotal = it.quarantinedTotal + 1,
+                                    lastError = "Quarantined ${file.name} after $attempts failed attempts"
+                                )
+                            }
+                            historyStore.record(
+                                ConversionRecord(
+                                    originalFilename = file.name,
+                                    outputFilename = "Quarantine/${quarDest.name}",
+                                    mediaType = "photo",
+                                    mode = "quarantined",
+                                    origBytes = origSize,
+                                    outBytes = quarDest.length(),
+                                    savedBytes = 0L,
+                                    savedPct = 0.0,
+                                    originalDeleted = true,
+                                    status = "quarantined",
+                                    errorMessage = "Quarantined after $attempts failed attempts: $errMsg"
+                                )
+                            )
+                            onStatsChanged()
+                        }
+                    } else {
+                        _state.update { it.copy(lastError = "${file.name} (attempt $attempts): $errMsg") }
+                    }
                 } finally {
                     queuedPaths.remove(pathKey)
                     _state.update { it.copy(activeFile = null, queueSize = queuedPaths.size) }
@@ -111,9 +132,69 @@ class IncomingFolderWatcher(
                         _state.update { it.copy(autoPurgedCount = it.autoPurgedCount + removed) }
                     }
                 }
-                delay(2500L)
+                delay(2000L)
             }
         }
+    }
+
+    private fun moveToQuarantine(file: File, attempts: Int, errorReason: String): File? {
+        if (!file.exists()) return null
+        val incDir = File(prefs.current.incomingDir)
+        val quarDir = prefs.quarantineFolder()
+        val relPath = try {
+            file.relativeTo(incDir).invariantSeparatorsPath
+        } catch (_: Exception) {
+            file.name
+        }
+        var dest = File(quarDir, file.name)
+        var idx = 1
+        while (dest.exists()) {
+            dest = File(quarDir, "${file.nameWithoutExtension}_$idx.${file.extension}")
+            idx++
+        }
+        return try {
+            if (!file.renameTo(dest)) {
+                file.copyTo(dest, overwrite = true)
+                file.delete()
+            }
+            historyStore.recordQuarantine(dest.name, relPath, attempts, errorReason)
+            dest
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun retryQuarantineFile(quarantineFilename: String): String? {
+        val quarDir = prefs.quarantineFolder()
+        val target = File(quarDir, File(quarantineFilename).name)
+        if (!target.isFile) return null
+        val (incDir, _) = prefs.ensureFolders()
+        val meta = historyStore.getQuarantineMeta(target.name)
+        val relPath = meta?.originalRelPath ?: target.name
+        var dest = File(incDir, relPath)
+        dest.parentFile?.mkdirs()
+        if (dest.exists()) {
+            dest = File(dest.parentFile, "${dest.nameWithoutExtension}_${UUID.randomUUID().toString().take(4)}.${dest.extension}")
+        }
+        if (!target.renameTo(dest)) {
+            target.copyTo(dest, overwrite = true)
+            target.delete()
+        }
+        historyStore.removeQuarantineMeta(target.name)
+        failureCounts.remove(dest.absolutePath)
+        enqueue(dest)
+        return dest.relativeTo(incDir).invariantSeparatorsPath
+    }
+
+    fun retryAllQuarantine(): Int {
+        val quarDir = prefs.quarantineFolder()
+        var count = 0
+        quarDir.listFiles()?.forEach { f ->
+            if (f.isFile && !f.name.startsWith(".")) {
+                if (retryQuarantineFile(f.name) != null) count++
+            }
+        }
+        return count
     }
 
     fun stop() {
@@ -149,7 +230,7 @@ class IncomingFolderWatcher(
         return count
     }
 
-    private fun listIncomingFiles(incDir: File, recursive: Boolean): List<File> {
+    fun listIncomingFiles(incDir: File, recursive: Boolean): List<File> {
         if (!incDir.isDirectory) return emptyList()
         return if (recursive) {
             incDir.walkTopDown()
@@ -161,11 +242,23 @@ class IncomingFolderWatcher(
         }
     }
 
+    fun listOutputFiles(outDir: File): List<File> {
+        if (!outDir.isDirectory) return emptyList()
+        return outDir.walkTopDown()
+            .onEnter { dir -> dir == outDir || !dir.name.startsWith(".") }
+            .filter { it.isFile && !it.name.startsWith(".") }
+            .toList()
+    }
+
     private fun pruneEmptySubfolders(incDir: File) {
         if (!incDir.isDirectory) return
+        val protectedNames = prefs.current.folderProfiles.map { it.folderName.lowercase() }.toSet()
         incDir.walkBottomUp().forEach { dir ->
             if (dir != incDir && dir.isDirectory && dir.listFiles().isNullOrEmpty()) {
-                dir.delete()
+                val isProtectedRoot = dir.parentFile == incDir && dir.name.lowercase() in protectedNames
+                if (!isProtectedRoot) {
+                    dir.delete()
+                }
             }
         }
     }
@@ -175,23 +268,21 @@ class IncomingFolderWatcher(
         var purged = 0
         val nowSec = System.currentTimeMillis() / 1000.0
         fun ingestedEpochSec(file: File): Double {
-            return historyStore.lookupByOutput(file.name)?.createdAtEpochSec
+            val rel = try { file.relativeTo(outDir).invariantSeparatorsPath } catch (_: Exception) { file.name }
+            return historyStore.lookupByOutput(rel)?.createdAtEpochSec
+                ?: historyStore.lookupByOutput(file.name)?.createdAtEpochSec
                 ?: (file.lastModified() / 1000.0)
         }
+        val allOutFiles = listOutputFiles(outDir)
         if (retentionDays > 0) {
             val cutoffSec = nowSec - (retentionDays.toDouble() * 86_400.0)
-            outDir.listFiles()?.forEach { f ->
-                if (f.isFile && !f.name.startsWith(".") && ingestedEpochSec(f) <= cutoffSec) {
-                    if (f.delete()) purged++
-                }
+            allOutFiles.forEach { f ->
+                if (ingestedEpochSec(f) <= cutoffSec && f.delete()) purged++
             }
         }
         if (minFreeGb > 0f) {
             val minBytes = (minFreeGb.toDouble() * 1024.0 * 1024.0 * 1024.0).toLong()
-            val filesOldestFirst = outDir.listFiles()
-                ?.filter { it.isFile && !it.name.startsWith(".") }
-                ?.sortedBy { ingestedEpochSec(it) }
-                .orEmpty()
+            val filesOldestFirst = listOutputFiles(outDir).sortedBy { ingestedEpochSec(it) }
             for (f in filesOldestFirst) {
                 val freeNow = try { StatFs(outDir.absolutePath).availableBytes } catch (_: Exception) { Long.MAX_VALUE }
                 if (freeNow >= minBytes) break

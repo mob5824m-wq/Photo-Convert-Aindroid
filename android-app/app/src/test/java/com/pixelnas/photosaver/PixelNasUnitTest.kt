@@ -2,10 +2,12 @@ package com.pixelnas.photosaver
 
 import com.pixelnas.photosaver.converter.PhotoDimensionCalculator
 import com.pixelnas.photosaver.converter.StorageSaverConverter
+import com.pixelnas.photosaver.model.NasConfig
 import com.pixelnas.photosaver.util.PixelDeviceDetector
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -13,8 +15,8 @@ import java.io.File
 class PixelNasUnitTest {
 
     @Test
-    fun `48MP iPhone RAW JPEG scales strictly within 16MP Storage Saver limit`() {
-        val target = PhotoDimensionCalculator.calculate(8000, 6000, 16.0)
+    fun `50MP Pixel Pro JPEG scales strictly within 16MP Storage Saver limit`() {
+        val target = PhotoDimensionCalculator.calculate(8160, 6120, 16.0)
         assertTrue(target.wasResized)
         assertTrue(target.width.toLong() * target.height.toLong() <= 16_000_000L)
         assertEquals(4618, target.width)
@@ -22,7 +24,7 @@ class PixelNasUnitTest {
     }
 
     @Test
-    fun `200MP Samsung camera uses power-of-2 inSampleSize to prevent 4GB Pixel OOM`() {
+    fun `200MP Samsung Galaxy camera uses power-of-2 inSampleSize to prevent 4GB Pixel OOM`() {
         val target = PhotoDimensionCalculator.calculate(16320, 12240, 16.0)
         assertTrue(target.wasResized)
         assertTrue("Expected inSampleSize >= 2 for 200MP OOM protection", target.sampleSize >= 2)
@@ -30,7 +32,28 @@ class PixelNasUnitTest {
     }
 
     @Test
-    fun `WhatsApp and PXL stripped EXIF filenames reconstruct historical EXIF date`() {
+    fun `Per-Folder Profiles match StorageSaver Original and Family incoming subfolders`() {
+        val cfg = NasConfig()
+        val incRoot = File("/storage/emulated/0/PixelNAS/Incoming")
+
+        val saver = cfg.matchFolderProfile(incRoot, File(incRoot, "StorageSaver/PXL_20261021_120000.jpg"))
+        assertNotNull(saver)
+        assertTrue(saver!!.storageSaverEnabled)
+
+        val orig = cfg.matchFolderProfile(incRoot, File(incRoot, "Original/SAM_20261021_120000.jpg"))
+        assertNotNull(orig)
+        assertFalse(orig!!.storageSaverEnabled)
+
+        val fam = cfg.matchFolderProfile(incRoot, File(incRoot, "family/IMG_20261021_120000.jpg"))
+        assertNotNull(fam)
+        assertEquals("Family", fam!!.outputSubfolder)
+
+        val rootDefault = cfg.matchFolderProfile(incRoot, File(incRoot, "direct_root.jpg"))
+        assertNull(rootDefault)
+    }
+
+    @Test
+    fun `WhatsApp Samsung and PXL stripped EXIF filenames reconstruct historical EXIF date`() {
         val wa = StorageSaverConverter.parseDateFromFilename("WhatsApp Image 2023-07-19 at 18.45.12.jpeg")
         assertNotNull(wa)
         assertEquals("2023:07:19 18:45:12", wa!!.first)
@@ -38,6 +61,10 @@ class PixelNasUnitTest {
         val pxl = StorageSaverConverter.parseDateFromFilename("PXL_20241225_083015999.jpg")
         assertNotNull(pxl)
         assertEquals("2024:12:25 08:30:15", pxl!!.first)
+
+        val sam = StorageSaverConverter.parseDateFromFilename("SAM_20250504_194501.jpg")
+        assertNotNull(sam)
+        assertEquals("2025:05:04 19:45:01", sam!!.first)
     }
 
     @Test
