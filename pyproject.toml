@@ -1,0 +1,9 @@
+[project]
+name = "pixel-photo-nas"
+version = "1.0.0"
+description = "Google Pixel 1–5 Photo NAS & Google Photos Storage Saver Converter"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
