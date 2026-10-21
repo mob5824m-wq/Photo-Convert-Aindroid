@@ -140,5 +140,6 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    testImplementation("com.hierynomus:smbj:0.13.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

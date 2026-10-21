@@ -163,6 +163,9 @@ class NasSettings:
     )
     ftp_enabled: bool = True
     ftp_port: int = 2121
+    smb_enabled: bool = True
+    smb_port: int = 4445
+    smb_share_name: str = "PixelNAS"
     auth_enabled: bool = False
     auth_username: str = "pixel"
     auth_password: str = ""

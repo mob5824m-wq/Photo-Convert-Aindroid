@@ -256,7 +256,7 @@
         <div class="card-head">
           <div>
             <h2>Per-Folder Upload Profiles (<code>/Incoming/&lt;Folder&gt;/</code>)</h2>
-            <p class="muted">Drop files into any subfolder via Android Widget, FolderSync, WebDAV, FTP, or Syncthing to apply its automatic quality &amp; album rule.</p>
+            <p class="muted">Drop files into any subfolder via the <strong>Household Samba Android App</strong>, Samba/SMB share, Android Widget, WebDAV, FTP, or Syncthing to apply its automatic quality &amp; album rule.</p>
           </div>
         </div>
 
@@ -376,14 +376,14 @@
       </div>
     </section>
 
-    <!-- TAB 4: ANDROID HOME SCREEN WIDGET & NAS NETWORK MOUNTS -->
+    <!-- TAB 4: SAMBA SHARE, HOUSEHOLD ANDROID APP & NAS NETWORK MOUNTS -->
     <section class="tab-panel" id="tab-network">
       <div class="grid-two">
         <div class="card">
           <div class="card-head">
             <div>
-              <h2>Android Home Screen Upload Widget &amp; Wi-Fi Mounts</h2>
-              <p class="muted">Install the APK on BOTH your closet Pixel 1–5 NAS and your daily Android phone — pin the Home Screen Upload Widget for 1-tap uploads!</p>
+              <h2>Samba File Share (<code>SMB2/3</code>) &amp; Household Android App</h2>
+              <p class="muted">Dedicated 2-APK ecosystem: install <code>PixelPhotoNAS.apk</code> on your closet Pixel 1–5 NAS and <code>PixelPhotoNAS-Household.apk</code> on every family member's Android phone!</p>
             </div>
           </div>
 
@@ -391,7 +391,7 @@
             <img id="portalQrImg" alt="Scan to open Pixel NAS Web UI" class="qr-image" />
             <div class="qr-meta">
               <strong>Scan from your daily Android phone on Wi-Fi</strong>
-              <p class="muted">Paste this NAS Server URL into the Android Upload Widget or open directly in Chrome.</p>
+              <p class="muted">Open the NAS dashboard in Chrome or auto-discover this Samba server in the Household Android App.</p>
               <div class="endpoint-copy-row">
                 <code id="endpointWebUrl">http://...</code>
                 <button class="btn btn-secondary btn-sm copy-btn" data-copy-target="endpointWebUrl">Copy</button>
@@ -402,13 +402,32 @@
           <div class="protocol-cards">
             <div class="protocol-item">
               <div class="protocol-header">
-                <strong>Native Android Home Screen Widget + Share Sheet</strong>
-                <span class="badge badge-accent">Built Into APK</span>
+                <strong>Samba / SMB2 File Share + Dedicated Household Android App</strong>
+                <span class="badge badge-success" id="smbBadgeStatus">Active</span>
+              </div>
+              <div class="endpoint-copy-row">
+                <code id="endpointSmbUnc">\\192.168.1.x\PixelNAS\Incoming\StorageSaver</code>
+                <button class="btn btn-secondary btn-sm copy-btn" data-copy-target="endpointSmbUnc">Copy</button>
+              </div>
+              <div class="endpoint-copy-row" style="margin-top:6px;">
+                <code id="endpointSmbUrl">smb://192.168.1.x:4445/PixelNAS/</code>
+                <button class="btn btn-secondary btn-sm copy-btn" data-copy-target="endpointSmbUrl">Copy</button>
               </div>
               <p class="protocol-help">
-                1. Long-press your daily Android phone's Home Screen → <strong>Widgets → Pixel Photo NAS</strong> (or tap <em>Pin Upload Widget to Home Screen</em> inside the app).<br />
-                2. Tap <strong>Saver (≤16 MP)</strong>, <strong>Original</strong>, or <strong>Family</strong> right on your Home Screen to open Android Photo Picker &amp; beam multi-photo batches straight to your closet Pixel NAS!<br />
-                3. Also works directly from Android's <strong>Share Sheet</strong> in Google Gallery, Samsung Gallery, or Files.
+                • <strong>Separate Household APK (<code>com.pixelnas.household</code>)</strong>: Connects directly over native <strong>Samba / SMB2 / SMB3</strong> (standard port <code>445</code> Samba shares AND port <code>4445</code> unrooted Pixel NAS shares) with 1-tap Wi-Fi discovery, Guest or NTLMv2 auth, per-member upload folders, live Samba browser, background Camera Roll Wi-Fi sync, Android Share Sheet, and Home Screen Upload Widget.<br />
+                • Also mounts natively in Windows Explorer, Linux <code>smbclient</code>, Material Files, Solid Explorer, CX File Explorer, and FolderSync.
+              </p>
+            </div>
+
+            <div class="protocol-item">
+              <div class="protocol-header">
+                <strong>Native Android Home Screen Upload Widget + Share Sheet</strong>
+                <span class="badge badge-accent">Included in Household APK</span>
+              </div>
+              <p class="protocol-help">
+                1. Install <code>PixelPhotoNAS-Household.apk</code> on each family member's Android phone and pair your Samba share in 1 tap.<br />
+                2. Pin the <strong>Pixel NAS Samba Upload Widget</strong> to your Home Screen → tap <strong>Saver (≤16 MP)</strong>, <strong>Original</strong>, or <strong>Family</strong> to upload directly over Samba!<br />
+                3. Also shares batches straight from Google Gallery, Samsung Gallery, or Android Files via <strong>Share Sheet → Send to NAS (Samba)</strong>.
               </p>
             </div>
 
@@ -457,8 +476,8 @@
         <div class="card">
           <div class="card-head">
             <div>
-              <h2>Pixel 1–5 Hardware Setup Guide</h2>
-              <p class="muted">How the Native Android APK &amp; Google Photos Unlimited Backup work together.</p>
+              <h2>2-APK Household Setup Guide</h2>
+              <p class="muted">How the Closet Pixel 1–5 NAS APK + Household Samba Client APK work together.</p>
             </div>
           </div>
 
@@ -466,16 +485,16 @@
             <div class="step-item">
               <span class="step-num">1</span>
               <div>
-                <strong>Install <code>PixelPhotoNAS.apk</code> on your Closet Pixel 1–5 &amp; Daily Android Phone</strong>
-                <p>Supports <strong>Pixel / Pixel XL (Android 8–10)</strong> through <strong>Pixel 2, 3, 3a, 4, 4a, 4a 5G, Pixel 5, and modern Android 11–15 phones</strong>.</p>
+                <strong>APK #1 (<code>PixelPhotoNAS.apk</code>) → Closet Pixel 1–5 Server</strong>
+                <p>Runs the 24/7 Samba (<code>SMB2</code>), Web UI, WebDAV, and FTP server plus hardware Storage Saver conversion into <code>DCIM/PixelNAS</code> for unlimited Google Photos backup.</p>
               </div>
             </div>
 
             <div class="step-item">
               <span class="step-num">2</span>
               <div>
-                <strong>Why <code>.nomedia</code> on Incoming &amp; Quarantine + <code>DCIM/PixelNAS</code> Matters</strong>
-                <p>Both <code>PixelNAS/Incoming</code> and <code>PixelNAS/Quarantine</code> carry automatic <code>.nomedia</code> guards so Google Photos ignores raw 50 MB uploads and broken files. Verified outputs land in <code>DCIM/PixelNAS</code> and trigger <code>MediaScannerConnection</code> immediately.</p>
+                <strong>APK #2 (<code>PixelPhotoNAS-Household.apk</code>) → Every Family Phone</strong>
+                <p>Lightweight Samba/SMB2/3 Android client for every household phone: connects directly to <code>\\&lt;NAS&gt;\PixelNAS</code> (port <code>445</code> or <code>4445</code>), uploads batches with atomic rename, browses shares, runs Wi-Fi auto-backup, and adds the Home Screen Widget + Share Sheet target.</p>
               </div>
             </div>
 
@@ -491,7 +510,7 @@
               <span class="step-num">4</span>
               <div>
                 <strong>24/7 Closet Server Protection</strong>
-                <p>Includes <code>BOOT_COMPLETED</code> auto-restart after power loss, mDNS auto-discovery (<code>_pixelnas._tcp</code>), Wi-Fi lock, 4 GB RAM OOM-safe decoding for 200 MP photos, hardware <code>MediaCodec</code> 1080p encoding, and <strong>41°C Battery Thermal Guard</strong>.</p>
+                <p>Includes <code>BOOT_COMPLETED</code> auto-restart after power loss, mDNS auto-discovery (<code>_smb._tcp</code> &amp; <code>_pixelnas._tcp</code>), Wi-Fi lock, 4 GB RAM OOM-safe decoding for 200 MP photos, hardware <code>MediaCodec</code> 1080p encoding, and <strong>41°C Battery Thermal Guard</strong>.</p>
               </div>
             </div>
           </div>
@@ -545,6 +564,15 @@
           </div>
 
           <div class="field">
+            <label for="inputSmbPort">Embedded Samba / SMB2 Port &amp; Share Name</label>
+            <div class="auth-inputs">
+              <input type="number" id="inputSmbPort" min="445" max="65535" value="4445" />
+              <input type="text" id="inputSmbShareName" placeholder="Share Name (PixelNAS)" value="PixelNAS" />
+            </div>
+            <small>Unrooted Pixel default <code>4445</code> (or <code>445</code> with root/port-forward). Household APK supports both automatically.</small>
+          </div>
+
+          <div class="field">
             <label for="inputFtpPort">Embedded FTP Port (Unprivileged &gt;1024)</label>
             <input type="number" id="inputFtpPort" min="1025" max="65535" value="2121" />
             <small>Default <code>2121</code> requires no root access on unrooted stock Pixel ROMs.</small>
@@ -553,7 +581,7 @@
           <div class="field">
             <label class="inline-check">
               <input type="checkbox" id="inputAuthEnabled" />
-              <span>Require Username &amp; Password on WebDAV &amp; FTP</span>
+              <span>Require Username &amp; Password on Samba, WebDAV &amp; FTP</span>
             </label>
             <div class="auth-inputs">
               <input type="text" id="inputAuthUser" placeholder="Username (e.g. pixel)" />

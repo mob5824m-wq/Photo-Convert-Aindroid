@@ -1,9 +1,17 @@
 package com.pixelnas.photosaver
 
+import com.hierynomus.msdtyp.AccessMask
+import com.hierynomus.mssmb2.SMB2CreateDisposition
+import com.hierynomus.mssmb2.SMB2ShareAccess
+import com.hierynomus.smbj.SMBClient
+import com.hierynomus.smbj.auth.AuthenticationContext
+import com.hierynomus.smbj.share.DiskShare
 import com.pixelnas.photosaver.converter.PhotoDimensionCalculator
 import com.pixelnas.photosaver.converter.StorageSaverConverter
 import com.pixelnas.photosaver.model.NasConfig
+import com.pixelnas.photosaver.network.NasSmbServer
 import com.pixelnas.photosaver.util.PixelDeviceDetector
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -11,6 +19,9 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.nio.file.Files
+import java.util.EnumSet
+import java.util.concurrent.CopyOnWriteArrayList
 
 class PixelNasUnitTest {
 
@@ -97,6 +108,89 @@ class PixelNasUnitTest {
         for (codename in listOf("walleye", "taimen", "blueline", "sargo", "flame", "sunfish", "bramble", "redfin")) {
             val info = PixelDeviceDetector.detectByCodename(codename)
             assertTrue("Expected Storage Saver recommended for $codename", info.recommendedSaver)
+        }
+    }
+
+    @Test
+    fun `NasSmbServer handles live SMB2 Guest and NTLMv2 signed uploads from smbj`() {
+        val tempRoot = Files.createTempDirectory("pixelnas_smb_test").toFile()
+        val incDir = File(tempRoot, "Incoming").also {
+            File(it, "StorageSaver").mkdirs()
+            File(it, "Original").mkdirs()
+            File(it, "Family").mkdirs()
+        }
+        val outDir = File(tempRoot, "Output").also { it.mkdirs() }
+        val quarDir = File(tempRoot, "Quarantine").also { it.mkdirs() }
+        val uploadedCallbacks = CopyOnWriteArrayList<File>()
+        var authRequired = false
+
+        val smb = NasSmbServer(
+            incomingDirProvider = { incDir },
+            outputDirProvider = { outDir },
+            quarantineDirProvider = { quarDir },
+            enabledProvider = { true },
+            portProvider = { 0 },
+            shareNameProvider = { "PixelNAS" },
+            authEnabledProvider = { authRequired },
+            authUserProvider = { "household" },
+            authPasswordProvider = { "SambaPass!2026" },
+            onIncomingFileClosed = { uploadedCallbacks.add(it) }
+        )
+
+        try {
+            smb.startOrReload()
+            assertTrue("Expected ephemeral port > 0", smb.activePort > 0)
+
+            // 1. Live SMB2 Guest connection + directory browse + atomic .part -> .jpg upload
+            val payload = ByteArray(90_000) { idx -> (idx % 251).toByte() }
+            SMBClient().use { client ->
+                client.connect("127.0.0.1", smb.activePort).use { conn ->
+                    val session = conn.authenticate(AuthenticationContext.guest())
+                    (session.connectShare("PixelNAS") as DiskShare).use { share ->
+                        val rootNames = share.list("").map { it.fileName }.toSet()
+                        assertTrue(rootNames.containsAll(setOf("Incoming", "Output", "Quarantine")))
+
+                        share.openFile(
+                            "Incoming\\StorageSaver\\.part_photo_1",
+                            EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.DELETE),
+                            null,
+                            SMB2ShareAccess.ALL,
+                            SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                            null
+                        ).use { remoteFile ->
+                            remoteFile.outputStream.use { os -> os.write(payload) }
+                            remoteFile.rename("Incoming\\StorageSaver\\family_shot.jpg", true)
+                        }
+
+                        val readBack = share.openFile(
+                            "Incoming\\StorageSaver\\family_shot.jpg",
+                            EnumSet.of(AccessMask.GENERIC_READ),
+                            null,
+                            SMB2ShareAccess.ALL,
+                            SMB2CreateDisposition.FILE_OPEN,
+                            null
+                        ).use { rf -> rf.inputStream.readBytes() }
+                        assertArrayEquals(payload, readBack)
+                    }
+                }
+            }
+            assertTrue(uploadedCallbacks.any { it.name == "family_shot.jpg" })
+
+            // 2. Live NTLMv2 signed auth mode
+            authRequired = true
+            SMBClient().use { client ->
+                client.connect("127.0.0.1", smb.activePort).use { conn ->
+                    val auth = AuthenticationContext("household", "SambaPass!2026".toCharArray(), "")
+                    val session = conn.authenticate(auth)
+                    (session.connectShare("Incoming") as DiskShare).use { share ->
+                        share.mkdir("MomPhone")
+                        assertTrue(share.folderExists("MomPhone"))
+                    }
+                }
+            }
+        } finally {
+            smb.stop()
+            tempRoot.deleteRecursively()
         }
     }
 }

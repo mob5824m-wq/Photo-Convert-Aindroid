@@ -104,6 +104,9 @@ class NasPreferences(context: Context) {
             jpegQuality = prefs.getInt("jpeg_quality", 85),
             maxVideoShortSide = prefs.getInt("max_video_short_side", 1080),
             httpPort = prefs.getInt("http_port", 8080),
+            smbEnabled = prefs.getBoolean("smb_enabled", true),
+            smbPort = prefs.getInt("smb_port", 4445),
+            smbShareName = prefs.getString("smb_share_name", "PixelNAS") ?: "PixelNAS",
             ftpEnabled = prefs.getBoolean("ftp_enabled", true),
             ftpPort = prefs.getInt("ftp_port", 2121),
             thermalLimitCelsius = prefs.getFloat("thermal_limit_celsius", 41.0f),
@@ -149,6 +152,9 @@ class NasPreferences(context: Context) {
             .putInt("jpeg_quality", updated.jpegQuality.coerceIn(40, 98))
             .putInt("max_video_short_side", updated.maxVideoShortSide)
             .putInt("http_port", updated.httpPort)
+            .putBoolean("smb_enabled", updated.smbEnabled)
+            .putInt("smb_port", updated.smbPort)
+            .putString("smb_share_name", updated.smbShareName.trim().ifBlank { "PixelNAS" })
             .putBoolean("ftp_enabled", updated.ftpEnabled)
             .putInt("ftp_port", updated.ftpPort)
             .putFloat("thermal_limit_celsius", updated.thermalLimitCelsius)

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pixel NAS Household</string>
+    <string name="share_sheet_label">Send to NAS (Samba)</string>
+    <string name="widget_label">Household Samba NAS Upload</string>
+    <string name="widget_description">Upload photos &amp; videos directly to your household Samba NAS share in 1 tap</string>
+</resources>

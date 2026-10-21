@@ -25,6 +25,7 @@ class PixelNasService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
+    private var smbRegistrationListener: NsdManager.RegistrationListener? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -58,9 +59,10 @@ class PixelNasService : Service() {
 
         acquireLocks()
         app.watcher.start()
+        app.smbServer.startOrReload()
         app.ftpServer.startOrReload()
         app.httpWebDavServer.start()
-        registerMdnsService(app.preferences.current.httpPort)
+        registerMdnsService(app.preferences.current.httpPort, app.smbServer.activePort)
         updateNotification()
         return START_STICKY
     }
@@ -77,39 +79,57 @@ class PixelNasService : Service() {
         unregisterMdnsService()
         app.httpWebDavServer.stop()
         app.ftpServer.stop()
+        app.smbServer.stop()
         app.watcher.stop()
         releaseLocks()
     }
 
-    private fun registerMdnsService(port: Int) {
-        if (registrationListener != null) return
+    private fun registerMdnsService(httpPort: Int, smbPort: Int) {
         try {
             val nsd = getSystemService(Context.NSD_SERVICE) as NsdManager
-            val info = NsdServiceInfo().apply {
-                serviceName = "PixelPhotoNAS"
-                serviceType = "_http._tcp."
-                setPort(port)
+            if (registrationListener == null) {
+                val info = NsdServiceInfo().apply {
+                    serviceName = "PixelPhotoNAS"
+                    serviceType = "_http._tcp."
+                    setPort(httpPort)
+                }
+                val listener = object : NsdManager.RegistrationListener {
+                    override fun onServiceRegistered(serviceInfo: NsdServiceInfo) = Unit
+                    override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+                    override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
+                    override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+                }
+                nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+                registrationListener = listener
             }
-            val listener = object : NsdManager.RegistrationListener {
-                override fun onServiceRegistered(serviceInfo: NsdServiceInfo) = Unit
-                override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
-                override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
-                override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+            if (smbRegistrationListener == null && smbPort > 0) {
+                val smbInfo = NsdServiceInfo().apply {
+                    serviceName = "PixelPhotoNAS"
+                    serviceType = "_smb._tcp."
+                    setPort(smbPort)
+                }
+                val smbListener = object : NsdManager.RegistrationListener {
+                    override fun onServiceRegistered(serviceInfo: NsdServiceInfo) = Unit
+                    override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+                    override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
+                    override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+                }
+                nsd.registerService(smbInfo, NsdManager.PROTOCOL_DNS_SD, smbListener)
+                smbRegistrationListener = smbListener
             }
-            nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
-            registrationListener = listener
         } catch (_: Exception) {
         }
     }
 
     private fun unregisterMdnsService() {
-        val listener = registrationListener ?: return
-        registrationListener = null
         try {
             val nsd = getSystemService(Context.NSD_SERVICE) as NsdManager
-            nsd.unregisterService(listener)
+            registrationListener?.let { nsd.unregisterService(it) }
+            smbRegistrationListener?.let { nsd.unregisterService(it) }
         } catch (_: Exception) {
         }
+        registrationListener = null
+        smbRegistrationListener = null
     }
 
     private fun acquireLocks() {

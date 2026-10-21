@@ -99,6 +99,7 @@ class NasViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateConfig(transform: (NasConfig) -> NasConfig) {
         val updated = app.preferences.update(transform)
+        app.smbServer.startOrReload()
         app.ftpServer.startOrReload()
         PixelNasUploadWidgetProvider.refreshAllWidgets(app)
         if (updated.autoWatchEnabled) {

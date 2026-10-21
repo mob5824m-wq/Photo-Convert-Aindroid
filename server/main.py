@@ -34,6 +34,7 @@ from server.converter import (
 from server.database import HistoryDatabase
 from server.demo_media import generate_sample_batch, seed_corrupted_transfer
 from server.ftp_server import EmbeddedFtpServer
+from server.smb_server import EmbeddedSmbServer
 from server.versioning import read_repo_version
 from server.watcher import PipelineWorker, iter_incoming_media, iter_output_media
 from server.webdav import create_webdav_router
@@ -44,12 +45,15 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
     db = HistoryDatabase(settings_mgr.db_file)
     worker = PipelineWorker(settings_mgr, db)
     ftp_server = EmbeddedFtpServer(settings_mgr, worker)
+    smb_server = EmbeddedSmbServer(settings_mgr, worker)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         worker.start()
         ftp_server.start_or_reload()
+        smb_server.start_or_reload()
         yield
+        smb_server.stop()
         ftp_server.stop()
         worker.stop()
 
@@ -62,6 +66,7 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
     app.state.db = db
     app.state.worker = worker
     app.state.ftp_server = ftp_server
+    app.state.smb_server = smb_server
 
     app.add_middleware(
         CORSMiddleware,
@@ -147,6 +152,17 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
                 "ftp_enabled": ftp_server.bound_port > 0,
                 "ftp_port": ftp_server.bound_port or cfg.ftp_port,
                 "ftp_url": f"ftp://{lan_ips[0]}:{ftp_server.bound_port or cfg.ftp_port}/Incoming/",
+                "smb_enabled": smb_server.bound_port > 0,
+                "smb_port": smb_server.bound_port or cfg.smb_port,
+                "smb_share_name": cfg.smb_share_name or "PixelNAS",
+                "smb_unc": f"\\\\{lan_ips[0]}\\{cfg.smb_share_name or 'PixelNAS'}",
+                "smb_incoming_unc": f"\\\\{lan_ips[0]}\\{cfg.smb_share_name or 'PixelNAS'}\\Incoming",
+                "smb_saver_unc": f"\\\\{lan_ips[0]}\\{cfg.smb_share_name or 'PixelNAS'}\\Incoming\\StorageSaver",
+                "smb_url": (
+                    f"smb://{lan_ips[0]}/{cfg.smb_share_name or 'PixelNAS'}/"
+                    if (smb_server.bound_port or cfg.smb_port) == 445
+                    else f"smb://{lan_ips[0]}:{smb_server.bound_port or cfg.smb_port}/{cfg.smb_share_name or 'PixelNAS'}/"
+                ),
                 "video_engine_available": get_ffmpeg_binary() is not None,
             },
         }
@@ -167,6 +183,15 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
             or old_cfg.auth_password != updated.auth_password
         ):
             ftp_server.start_or_reload()
+        if (
+            old_cfg.smb_enabled != updated.smb_enabled
+            or old_cfg.smb_port != updated.smb_port
+            or old_cfg.smb_share_name != updated.smb_share_name
+            or old_cfg.auth_enabled != updated.auth_enabled
+            or old_cfg.auth_username != updated.auth_username
+            or old_cfg.auth_password != updated.auth_password
+        ):
+            smb_server.start_or_reload()
         if updated.auto_watch_enabled:
             worker.process_all_now()
         return updated.sanitized_dict()

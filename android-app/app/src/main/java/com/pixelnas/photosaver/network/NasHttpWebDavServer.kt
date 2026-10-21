@@ -62,7 +62,8 @@ class NasHttpWebDavServer(
     private val prefs: NasPreferences,
     private val historyStore: HistoryStore,
     private val watcher: IncomingFolderWatcher,
-    private val ftpServer: NasFtpServer
+    private val ftpServer: NasFtpServer,
+    private val smbServer: NasSmbServer
 ) {
     private var engine: CIOApplicationEngine? = null
 
@@ -161,6 +162,19 @@ class NasHttpWebDavServer(
                             put("ftp_enabled", ftpServer.activePort > 0)
                             put("ftp_port", if (ftpServer.activePort > 0) ftpServer.activePort else cfg.ftpPort)
                             put("ftp_url", "ftp://${ips.first()}:${cfg.ftpPort}/Incoming/")
+                            val effectiveSmbPort = if (smbServer.activePort > 0) smbServer.activePort else cfg.smbPort
+                            val shareName = cfg.smbShareName.ifBlank { "PixelNAS" }
+                            put("smb_enabled", smbServer.activePort > 0)
+                            put("smb_port", effectiveSmbPort)
+                            put("smb_share_name", shareName)
+                            put("smb_unc", "\\\\${ips.first()}\\$shareName")
+                            put("smb_incoming_unc", "\\\\${ips.first()}\\$shareName\\Incoming")
+                            put("smb_saver_unc", "\\\\${ips.first()}\\$shareName\\Incoming\\StorageSaver")
+                            put(
+                                "smb_url",
+                                if (effectiveSmbPort == 445) "smb://${ips.first()}/$shareName/"
+                                else "smb://${ips.first()}:$effectiveSmbPort/$shareName/"
+                            )
                             put("video_engine_available", true)
                         })
                     }
@@ -222,6 +236,8 @@ class NasHttpWebDavServer(
                             outputDir = body.optString("output_dir", old.outputDir),
                             quarantineDir = body.optString("quarantine_dir", old.quarantineDir),
                             folderProfiles = nextProfiles,
+                            smbPort = body.optInt("smb_port", old.smbPort),
+                            smbShareName = body.optString("smb_share_name", old.smbShareName),
                             ftpPort = body.optInt("ftp_port", old.ftpPort),
                             authEnabled = body.optBoolean("auth_enabled", old.authEnabled),
                             authUsername = body.optString("auth_username", old.authUsername),
@@ -229,6 +245,7 @@ class NasHttpWebDavServer(
                             thermalLimitCelsius = body.optDouble("thermal_limit_celsius", old.thermalLimitCelsius.toDouble()).toFloat()
                         )
                     }
+                    smbServer.startOrReload()
                     ftpServer.startOrReload()
                     if (updated.autoWatchEnabled) watcher.processAllNow()
                     val hw = PixelDeviceDetector.detectCurrentDevice()
@@ -776,6 +793,9 @@ class NasHttpWebDavServer(
             put("output_dir", cfg.outputDir)
             put("ftp_enabled", cfg.ftpEnabled)
             put("ftp_port", cfg.ftpPort)
+            put("smb_enabled", cfg.smbEnabled)
+            put("smb_port", cfg.smbPort)
+            put("smb_share_name", cfg.smbShareName)
             put("thermal_limit_celsius", cfg.thermalLimitCelsius)
             put("auth_enabled", cfg.authEnabled)
             put("auth_username", cfg.authUsername)

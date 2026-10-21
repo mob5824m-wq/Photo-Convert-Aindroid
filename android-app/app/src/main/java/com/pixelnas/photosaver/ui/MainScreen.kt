@@ -90,6 +90,13 @@ fun MainScreen(
     }
 
     val webPortalUrl = "http://${telemetry.lanIp}:${cfg.httpPort}"
+    val shareName = cfg.smbShareName.ifBlank { "PixelNAS" }
+    val smbShareUnc = "\\\\${telemetry.lanIp}\\$shareName\\Incoming\\StorageSaver"
+    val smbShareUrl = if (cfg.smbPort == 445) {
+        "smb://${telemetry.lanIp}/$shareName/"
+    } else {
+        "smb://${telemetry.lanIp}:${cfg.smbPort}/$shareName/"
+    }
     val webDavUrl = "$webPortalUrl/webdav/Incoming/StorageSaver/"
     val ftpUrl = "ftp://${telemetry.lanIp}:${cfg.ftpPort}/Incoming/"
 
@@ -251,11 +258,12 @@ fun MainScreen(
                             )
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
-                                Text("Browser Portal & Widget API", style = MaterialTheme.typography.labelMedium)
-                                Text(webPortalUrl, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text("Samba Share (Household APK · SMB2/3)", style = MaterialTheme.typography.labelMedium)
+                                Text(smbShareUnc, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text(smbShareUrl, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Spacer(Modifier.height(4.dp))
-                                Text("WebDAV Saver Folder", style = MaterialTheme.typography.labelMedium)
-                                Text(webDavUrl, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text("Browser Portal & WebDAV", style = MaterialTheme.typography.labelMedium)
+                                Text(webPortalUrl, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Spacer(Modifier.height(4.dp))
                                 Text("FTP Server", style = MaterialTheme.typography.labelMedium)
                                 Text(ftpUrl, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
@@ -272,9 +280,9 @@ fun MainScreen(
                                 Text("Open Web UI")
                             }
                             OutlinedButton(
-                                onClick = { copyText(context, webDavUrl, "Copied WebDAV URL") }
+                                onClick = { copyText(context, smbShareUrl, "Copied Samba Share URL") }
                             ) {
-                                Text("Copy WebDAV")
+                                Text("Copy Samba URL")
                             }
                         }
                     }

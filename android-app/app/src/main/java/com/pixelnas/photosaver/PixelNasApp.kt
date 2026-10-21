@@ -5,6 +5,7 @@ import com.pixelnas.photosaver.data.HistoryStore
 import com.pixelnas.photosaver.data.NasPreferences
 import com.pixelnas.photosaver.network.NasFtpServer
 import com.pixelnas.photosaver.network.NasHttpWebDavServer
+import com.pixelnas.photosaver.network.NasSmbServer
 import com.pixelnas.photosaver.watcher.IncomingFolderWatcher
 
 class PixelNasApp : Application() {
@@ -16,6 +17,9 @@ class PixelNasApp : Application() {
         private set
 
     lateinit var watcher: IncomingFolderWatcher
+        private set
+
+    lateinit var smbServer: NasSmbServer
         private set
 
     lateinit var ftpServer: NasFtpServer
@@ -36,13 +40,15 @@ class PixelNasApp : Application() {
             historyStore = historyStore,
             onStatsChanged = { onServiceNotificationRefresh?.invoke() }
         )
+        smbServer = NasSmbServer(preferences, watcher)
         ftpServer = NasFtpServer(preferences, watcher)
         httpWebDavServer = NasHttpWebDavServer(
             context = this,
             prefs = preferences,
             historyStore = historyStore,
             watcher = watcher,
-            ftpServer = ftpServer
+            ftpServer = ftpServer,
+            smbServer = smbServer
         )
     }
 }

@@ -138,6 +138,17 @@
 
     // Network Endpoints & QR
     $("endpointWebUrl").textContent = st.network.web_ui_url;
+    if ($("endpointSmbUnc")) {
+      $("endpointSmbUnc").textContent = st.network.smb_saver_unc || st.network.smb_unc || "";
+    }
+    if ($("endpointSmbUrl")) {
+      $("endpointSmbUrl").textContent = st.network.smb_url || "";
+    }
+    if ($("smbBadgeStatus")) {
+      $("smbBadgeStatus").textContent = st.network.smb_enabled
+        ? `Active · :${st.network.smb_port}`
+        : "Disabled";
+    }
     $("endpointWebdavUrl").textContent = st.network.webdav_saver_url || st.network.webdav_incoming_url;
     $("endpointFtpUrl").textContent = st.network.ftp_url;
     $("ftpBadgeStatus").textContent = st.network.ftp_enabled ? `Active · :${st.network.ftp_port}` : "Disabled";
@@ -158,6 +169,12 @@
       $("inputJpegQuality").value = cfg.jpeg_quality;
       $("labelJpegQuality").textContent = `${cfg.jpeg_quality}%`;
       $("inputVideoRes").value = String(cfg.max_video_short_side);
+      if ($("inputSmbPort")) {
+        $("inputSmbPort").value = cfg.smb_port || 4445;
+      }
+      if ($("inputSmbShareName")) {
+        $("inputSmbShareName").value = cfg.smb_share_name || "PixelNAS";
+      }
       $("inputFtpPort").value = cfg.ftp_port;
       $("inputAuthEnabled").checked = !!cfg.auth_enabled;
       $("inputAuthUser").value = cfg.auth_username || "pixel";
@@ -771,6 +788,10 @@
         max_megapixels: Number($("inputMaxMp").value),
         jpeg_quality: Number($("inputJpegQuality").value),
         max_video_short_side: Number($("inputVideoRes").value),
+        smb_port: $("inputSmbPort") ? Number($("inputSmbPort").value) : 4445,
+        smb_share_name: $("inputSmbShareName")
+          ? $("inputSmbShareName").value.trim() || "PixelNAS"
+          : "PixelNAS",
         ftp_port: Number($("inputFtpPort").value),
         auth_enabled: $("inputAuthEnabled").checked,
         auth_username: $("inputAuthUser").value.trim() || "pixel",
