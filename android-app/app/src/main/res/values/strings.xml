@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Pixel Photo NAS</string>
+    <string name="widget_description">One-tap Android Photo Picker upload straight to your Pixel Photo NAS (Storage Saver, Original, or Family folder)</string>
+    <string name="share_upload_label">Upload to Pixel Photo NAS</string>
+</resources>
