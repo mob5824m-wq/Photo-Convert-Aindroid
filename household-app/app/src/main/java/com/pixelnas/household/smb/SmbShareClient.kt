@@ -4,7 +4,6 @@ import com.hierynomus.msdtyp.AccessMask
 import com.hierynomus.msdtyp.FileTime
 import com.hierynomus.msfscc.FileAttributes
 import com.hierynomus.msfscc.fileinformation.FileBasicInformation
-import com.hierynomus.msfscc.fileinformation.FileIdBothDirectoryInformation
 import com.hierynomus.mssmb2.SMB2CreateDisposition
 import com.hierynomus.mssmb2.SMB2CreateOptions
 import com.hierynomus.mssmb2.SMB2ShareAccess
@@ -108,7 +107,7 @@ class SmbShareClient {
     fun browseFolder(cfg: SmbConnectionConfig, relativePath: String = ""): List<SmbRemoteEntry> {
         val cleanRel = normalizeSmbPath(relativePath)
         return withDiskShare(cfg) { share, _ ->
-            share.list(cleanRel, FileIdBothDirectoryInformation::class.java, null)
+            share.list(cleanRel)
                 .filter { it.fileName != "." && it.fileName != ".." && !it.fileName.startsWith(".upload_") }
                 .map { item ->
                     val childRel = if (cleanRel.isEmpty()) item.fileName else "$cleanRel\\${item.fileName}"

@@ -3,32 +3,57 @@ package com.pixelnas.household
 import com.pixelnas.household.model.SmbAuthMode
 import com.pixelnas.household.model.SmbConnectionConfig
 import com.pixelnas.household.smb.SmbShareClient
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.awt.Color
-import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
-import javax.imageio.ImageIO
+import java.io.File
 
 class HouseholdSmbIntegrationTest {
 
-    private fun makeHighResJpegBytes(width: Int = 5000, height: Int = 3600): ByteArray {
-        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
-        val g = img.createGraphics()
-        g.color = Color(20, 148, 136)
-        g.fillRect(0, 0, width, height)
-        g.dispose()
-        val out = ByteArrayOutputStream()
-        ImageIO.write(img, "jpg", out)
-        return out.toByteArray()
+    /** Reads exact (width, height) directly from standard JPEG SOF0/SOF1/SOF2 frame header bytes. */
+    private fun parseJpegDimensions(bytes: ByteArray): Pair<Int, Int>? {
+        if (bytes.size < 4 || (bytes[0].toInt() and 0xFF) != 0xFF || (bytes[1].toInt() and 0xFF) != 0xD8) {
+            return null
+        }
+        var i = 2
+        while (i + 8 < bytes.size) {
+            if ((bytes[i].toInt() and 0xFF) != 0xFF) {
+                i++
+                continue
+            }
+            val marker = bytes[i + 1].toInt() and 0xFF
+            if (marker == 0xFF) {
+                i++
+                continue
+            }
+            if (marker == 0xD8 || marker in 0xD0..0xD7 || marker == 0x01) {
+                i += 2
+                continue
+            }
+            if (marker == 0xD9 || marker == 0xDA) break
+            val segLen = ((bytes[i + 2].toInt() and 0xFF) shl 8) or (bytes[i + 3].toInt() and 0xFF)
+            if (marker in listOf(0xC0, 0xC1, 0xC2) && i + 8 < bytes.size) {
+                val h = ((bytes[i + 5].toInt() and 0xFF) shl 8) or (bytes[i + 6].toInt() and 0xFF)
+                val w = ((bytes[i + 7].toInt() and 0xFF) shl 8) or (bytes[i + 8].toInt() and 0xFF)
+                return w to h
+            }
+            if (segLen < 2) break
+            i += 2 + segLen
+        }
+        return null
     }
 
     @Test
     fun `SmbShareClient connects over live SMB2 uploads atomically browses folders and receives converted output`() {
         val livePort = System.getenv("LIVE_SMB_TEST_PORT")?.toIntOrNull() ?: return
+        val sampleJpegPath = System.getenv("LIVE_SMB_TEST_JPEG") ?: return
+        val rawJpeg = File(sampleJpegPath).readBytes()
+        val origDims = parseJpegDimensions(rawJpeg)
+        assertNotNull("Expected valid input JPEG", origDims)
+        assertTrue("Expected input > 16 MP", origDims!!.first.toLong() * origDims.second.toLong() > 16_000_000L)
+
         val client = SmbShareClient()
         val cfg = SmbConnectionConfig(
             host = "127.0.0.1",
@@ -48,7 +73,6 @@ class HouseholdSmbIntegrationTest {
         assertTrue(space.topFolders.containsAll(listOf("Incoming", "Output", "Quarantine")))
 
         // 2. Atomic streaming upload (.part -> .jpg) with capture timestamp preservation
-        val rawJpeg = makeHighResJpegBytes() // 18.0 MP (> 16.0 MP threshold!)
         var lastReportedBytes = 0L
         val captureTimeMs = 1_761_060_000_000L
         val (remoteUnc, bytesSent) = client.uploadStreamAtomically(
@@ -68,7 +92,7 @@ class HouseholdSmbIntegrationTest {
         assertTrue(incEntries.any { it.isDirectory && it.name == "FamilyTrip" })
         client.deleteEntry(cfg, "Incoming\\FamilyTrip", isDirectory = true)
 
-        // 4. Wait for NAS background worker to convert 18 MP upload -> <= 16 MP JPEG inside Output/
+        // 4. Wait for NAS background worker to convert 19.7 MP upload -> <= 16 MP JPEG inside Output/
         val deadline = System.currentTimeMillis() + 15_000L
         var convertedEntryName: String? = null
         while (System.currentTimeMillis() < deadline) {
@@ -80,12 +104,13 @@ class HouseholdSmbIntegrationTest {
             }
             Thread.sleep(250L)
         }
-        assertTrue("Expected converted photo in Samba Output share", convertedEntryName != null)
+        assertNotNull("Expected converted photo in Samba Output share", convertedEntryName)
 
         // 5. Read back converted photo directly over Samba and verify <= 16 MP downscale!
         val convertedBytes = client.readFileBytes(cfg, "Output\\$convertedEntryName")
-        val decoded = ImageIO.read(ByteArrayInputStream(convertedBytes))
-        val outMp = (decoded.width.toDouble() * decoded.height.toDouble()) / 1_000_000.0
+        val outDims = parseJpegDimensions(convertedBytes)
+        assertNotNull("Expected valid converted JPEG", outDims)
+        val outMp = (outDims!!.first.toDouble() * outDims.second.toDouble()) / 1_000_000.0
         assertTrue("Expected converted image <= 16.05 MP, got $outMp MP", outMp <= 16.05)
 
         // Verify raw original in Incoming/StorageSaver/MomPhone was cleaned up after verification

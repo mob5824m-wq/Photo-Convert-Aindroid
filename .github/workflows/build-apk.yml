@@ -102,11 +102,13 @@ jobs:
           python3 -c '
           import signal, sys, tempfile, time
           from pathlib import Path
+          from PIL import Image
           from server.config import SettingsManager
           from server.database import HistoryDatabase
           from server.watcher import PipelineWorker
           from server.smb_server import EmbeddedSmbServer
 
+          Image.new("RGB", (5200, 3800), color=(20, 148, 136)).save(sys.argv[2], format="JPEG", quality=90)
           tmp = tempfile.TemporaryDirectory()
           mgr = SettingsManager(base_dir=Path(tmp.name))
           mgr.update({"smb_port": 14445, "ftp_enabled": False})
@@ -119,7 +121,7 @@ jobs:
           signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
           while True:
               time.sleep(0.5)
-          ' "$RUNNER_TEMP/smb_port.txt" &
+          ' "$RUNNER_TEMP/smb_port.txt" "$RUNNER_TEMP/sample_19mp.jpg" &
           SMB_PID=$!
           trap "kill $SMB_PID 2>/dev/null || true" EXIT
           for _ in $(seq 1 30); do
@@ -130,7 +132,7 @@ jobs:
           echo "Live NAS Samba server active on 127.0.0.1:${LIVE_PORT}"
 
           cd household-app
-          if ! LIVE_SMB_TEST_PORT="$LIVE_PORT" gradle testDebugUnitTest assembleDebug assembleRelease \
+          if ! LIVE_SMB_TEST_PORT="$LIVE_PORT" LIVE_SMB_TEST_JPEG="$RUNNER_TEMP/sample_19mp.jpg" gradle testDebugUnitTest assembleDebug assembleRelease \
             -PappVersionName="${{ steps.ver.outputs.version }}" \
             -PappVersionCode="${{ steps.ver.outputs.version_code }}" \
             --no-daemon > "$RUNNER_TEMP/gradle-household.log" 2>&1; then
