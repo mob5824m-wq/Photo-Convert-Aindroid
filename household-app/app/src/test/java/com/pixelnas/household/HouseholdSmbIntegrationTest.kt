@@ -113,8 +113,8 @@ class HouseholdSmbIntegrationTest {
         val outMp = (outDims!!.first.toDouble() * outDims.second.toDouble()) / 1_000_000.0
         assertTrue("Expected converted image <= 16.05 MP, got $outMp MP", outMp <= 16.05)
 
-        // Verify raw original in Incoming/StorageSaver/MomPhone was cleaned up after verification
-        val remainingInStaging = client.browseFolder(cfg, "Incoming\\StorageSaver\\MomPhone")
-        assertTrue(remainingInStaging.isEmpty())
+        // Verify raw original (and temporary MomPhone staging folder) in Incoming/StorageSaver was cleaned up
+        val saverEntries = client.browseFolder(cfg, "Incoming\\StorageSaver")
+        assertTrue(saverEntries.none { it.name.contains("PXL_20261021_153000") || it.name == "MomPhone" })
     }
 }

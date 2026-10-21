@@ -137,8 +137,9 @@ jobs:
             -PappVersionCode="${{ steps.ver.outputs.version_code }}" \
             --no-daemon > "$RUNNER_TEMP/gradle-household.log" 2>&1; then
             cat "$RUNNER_TEMP/gradle-household.log"
-            ERR_SUMMARY=$(grep -E "(^e: |FAILURE:|What went wrong:|^\* |> Task .* FAILED|Caused by:|Error:)" "$RUNNER_TEMP/gradle-household.log" | tail -n 25 | tr '\n' ' | ')
-            echo "::error title=Household APK Gradle Failure::$ERR_SUMMARY"
+            ERR_SUMMARY=$(grep -E "(^e: |FAILURE:|What went wrong:|^\* |> Task .* FAILED|Caused by:|Error:)" "$RUNNER_TEMP/gradle-household.log" | tail -n 15 | tr '\n' ' | ')
+            JUNIT_XML=$(grep -R -h -A 12 "<failure" app/build/test-results/ 2>/dev/null | head -n 20 | tr '\n' ' | ' || true)
+            echo "::error title=Household APK Gradle Failure::$ERR_SUMMARY :: $JUNIT_XML"
             exit 1
           fi
           cat "$RUNNER_TEMP/gradle-household.log" | tail -n 30
