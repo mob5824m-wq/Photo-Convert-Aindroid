@@ -1,0 +1,6 @@
+-keep class io.ktor.** { *; }
+-keep class kotlinx.coroutines.** { *; }
+-keep class org.apache.ftpserver.** { *; }
+-keep class org.apache.mina.** { *; }
+-dontwarn java.lang.management.**
+-dontwarn javax.naming.**

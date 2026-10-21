@@ -1,0 +1,23 @@
+# Python / Runtime data
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+runtime_data/
+*.db
+*.sqlite3
+
+# Android / Gradle build outputs
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+android-app/local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# OS / Editor
+.DS_Store
+.idea/
+*.iml
