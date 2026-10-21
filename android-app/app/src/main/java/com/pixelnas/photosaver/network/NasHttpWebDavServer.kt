@@ -94,6 +94,12 @@ class NasHttpWebDavServer(
                 get("/index.html") { serveAsset(call, "webui/index.html", ContentType.Text.Html) }
                 get("/styles.css") { serveAsset(call, "webui/styles.css", ContentType.Text.CSS) }
                 get("/app.js") { serveAsset(call, "webui/app.js", ContentType.Application.JavaScript) }
+                get("/logo.png") { serveAsset(call, "webui/logo.png", ContentType.Image.PNG) }
+                get("/app-icon.png") { serveAsset(call, "webui/app-icon.png", ContentType.Image.PNG) }
+                get("/icon-192.png") { serveAsset(call, "webui/icon-192.png", ContentType.Image.PNG) }
+                get("/favicon.png") { serveAsset(call, "webui/favicon.png", ContentType.Image.PNG) }
+                get("/favicon.ico") { serveAsset(call, "webui/favicon.png", ContentType.Image.PNG) }
+                get("/manifest.json") { serveAsset(call, "webui/manifest.json", ContentType.Application.Json) }
 
                 get("/api/status") {
                     val cfg = prefs.current

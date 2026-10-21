@@ -1,4 +1,9 @@
-# Pixel Photo NAS + Dedicated Household Samba Android App
+<div align="center">
+  <img src="assets/branding/logo.png" alt="Pixel Photo NAS Logo" width="640" style="border-radius: 16px;" />
+  <br /><br />
+  <img src="assets/branding/app-icon.png" alt="Pixel Photo NAS App Icon" width="112" height="112" style="border-radius: 26px;" />
+  <h1>Pixel Photo NAS + Dedicated Household Samba Android App</h1>
+</div>
 
 Turn any **Google Pixel 1 through Pixel 5** (or Linux/Termux box) into a self-hosted 24/7 home Wi-Fi **Photo & Video NAS** with a **dedicated standalone Household Android App (`com.pixelnas.household`)** that connects **directly over Samba / SMB2 / SMB3 file shares (`\\<nas>\PixelNAS`)**:
 
