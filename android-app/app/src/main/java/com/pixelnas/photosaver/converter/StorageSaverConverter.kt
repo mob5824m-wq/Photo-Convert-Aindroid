@@ -346,6 +346,12 @@ object StorageSaverConverter {
         }
 
         // Hardware MediaCodec 1080p MP4 transcode via AndroidX Media3 Transformer
+        val targetVideoHeight = if (origW > 0 && origH > origW) {
+            // Vertical smartphone video (e.g. 2160x3840 -> height 1920 so short edge is 1080)
+            (((config.maxVideoShortSide.toDouble() * origH.toDouble()) / origW.toDouble()).toInt() / 2) * 2
+        } else {
+            config.maxVideoShortSide
+        }
         val dest = uniqueOutputFile(outputDir, sourceFile.nameWithoutExtension, ".mp4")
         val tmp = File(outputDir, ".converting_${UUID.randomUUID()}.mp4")
         try {
@@ -355,7 +361,7 @@ object StorageSaverConverter {
                         .setEffects(
                             Effects(
                                 emptyList(),
-                                listOf(Presentation.createForShortSide(config.maxVideoShortSide))
+                                listOf(Presentation.createForHeight(targetVideoHeight))
                             )
                         )
                         .build()
