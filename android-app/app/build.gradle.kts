@@ -3,6 +3,9 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val resolvedVersionCode = (findProperty("appVersionCode") as? String)?.toIntOrNull() ?: 1
+val resolvedVersionName = (findProperty("appVersionName") as? String)?.takeIf { it.isNotBlank() } ?: "1.0.0"
+
 android {
     namespace = "com.pixelnas.photosaver"
     compileSdk = 34
@@ -11,8 +14,8 @@ android {
         applicationId = "com.pixelnas.photosaver"
         minSdk = 26 // Android 8.0 Oreo -> supports Google Pixel 1, 2, 3, 3a, 4, 4a, 4a 5G, Pixel 5 & daily Android phones
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = resolvedVersionCode
+        versionName = resolvedVersionName
 
         vectorDrawables {
             useSupportLibrary = true
@@ -21,12 +24,19 @@ android {
 
     signingConfigs {
         create("releaseSigned") {
-            val ksPath = System.getenv("KEYSTORE_PATH")
-            if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
-                storeFile = file(ksPath)
-                storePassword = System.getenv("KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("KEY_ALIAS")
-                keyPassword = System.getenv("KEY_PASSWORD")
+            val envKs = System.getenv("KEYSTORE_PATH")
+            val defaultRepoKs = file("../keystore/pixelnas-release.p12")
+            val chosenKs = when {
+                !envKs.isNullOrBlank() && file(envKs).exists() -> file(envKs)
+                defaultRepoKs.exists() -> defaultRepoKs
+                else -> null
+            }
+            if (chosenKs != null) {
+                storeFile = chosenKs
+                storeType = if (chosenKs.extension.equals("p12", ignoreCase = true)) "PKCS12" else "JKS"
+                storePassword = System.getenv("KEYSTORE_PASSWORD")?.takeIf { it.isNotBlank() } ?: "pixelnas2026"
+                keyAlias = System.getenv("KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "pixelnas"
+                keyPassword = System.getenv("KEY_PASSWORD")?.takeIf { it.isNotBlank() } ?: "pixelnas2026"
                 enableV1Signing = true
                 enableV2Signing = true
             }

@@ -34,6 +34,7 @@ from server.converter import (
 from server.database import HistoryDatabase
 from server.demo_media import generate_sample_batch, seed_corrupted_transfer
 from server.ftp_server import EmbeddedFtpServer
+from server.versioning import read_repo_version
 from server.watcher import PipelineWorker, iter_incoming_media, iter_output_media
 from server.webdav import create_webdav_router
 
@@ -54,7 +55,7 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
 
     app = FastAPI(
         title="Pixel Photo NAS (Google Photos Storage Saver Relay)",
-        version="1.2.0",
+        version=read_repo_version(),
         lifespan=lifespan,
     )
     app.state.settings_mgr = settings_mgr
@@ -106,7 +107,7 @@ def create_app(data_dir: Optional[Path] = None) -> FastAPI:
 
         return {
             "app_name": "Pixel Photo NAS",
-            "version": "1.2.0",
+            "version": read_repo_version(),
             "settings": cfg.sanitized_dict(),
             "profiles": PIXEL_PROFILES,
             "worker": worker.status(),

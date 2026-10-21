@@ -1,10 +1,20 @@
-# Pixel Photo NAS v1.2.0 (Android Unlimited Google Photos Relay + Home Screen Upload Widget)
+# Pixel Photo NAS (Android Unlimited Google Photos Relay + Home Screen Upload Widget)
 
 Turn any **Google Pixel 1 through Pixel 5** into a self-hosted 24/7 home Wi-Fi **Photo & Video NAS** — paired with a **Native Android Home Screen Upload Widget & Share Sheet** for your daily Android phones — that:
 1. Accepts high-resolution Android camera uploads into **Folder 1 (`Incoming`)** via **Native Android Home Screen Upload Widget**, **Android System Share Sheet**, **Browser Drag-and-Drop Web Portal**, **WebDAV Network Drive**, **FTP Server (`:2121`)**, or **Local Sync (FolderSync / Round Sync / Syncthing-Fork)**,
 2. Routes files automatically using **Per-Folder Profiles** (`/Incoming/StorageSaver/` → `≤ 16.0 MP` Storage Saver, `/Incoming/Original/` → `100%` untouched Original pass-through, `/Incoming/Family/` + custom family/album rules → dedicated `DCIM/PixelNAS/<Album>` output folder),
 3. Isolates half-finished or unreadable transfers into a `.nomedia`-shielded **Quarantine Folder (`PixelNAS/Quarantine/`)** after 2 failed retries so corrupted files never block your watcher queue,
 4. Moves verified outputs into **Folder 2 (`DCIM/PixelNAS`)**, immediately notifies Android's `MediaStore` so **Google Photos** backs them up automatically, and **deletes high-resolution originals** once verified.
+
+---
+
+## Automated APK Compilation & Rollover Versioning on Every Merge
+
+GitHub Actions (`.github/workflows/build-apk.yml` + `server/versioning.py`) automatically runs unit tests, compiles V1+V2 signed APKs with a persistent release certificate (`android-app/keystore/pixelnas-release.p12` so updates install seamlessly over prior builds), and publishes a tagged **GitHub Release** on every merge into `main`:
+
+- **First merge to `main`**: **`v1.0.0`** (`versionCode = 1`)
+- **Patch increments (`+0.0.1`)**: `v1.0.0` → `v1.0.1` → … → `v1.0.9` → **`v1.1.0`**
+- **Minor column rollover**: `v1.1.0` → … → `v1.8.9` → `v1.9.0` → … → `v1.9.9` → **`v2.0.0`**
 
 ---
 
@@ -20,7 +30,7 @@ Turn any **Google Pixel 1 through Pixel 5** into a self-hosted 24/7 home Wi-Fi *
 
 ---
 
-## Key Capabilities in v1.2.0
+## Key Capabilities
 
 - **Native Android Home Screen Upload Widget & Share Sheet (`PixelNasUploadWidgetProvider`)**:
   - Install the same APK on both your closet **Pixel 1–5 NAS** and your **daily Android phone** (Pixel 8/9, Samsung Galaxy, OnePlus, Motorola, Nothing, etc.).
@@ -41,7 +51,7 @@ Turn any **Google Pixel 1 through Pixel 5** into a self-hosted 24/7 home Wi-Fi *
 
 ## Option 1 — Install Native Android App (`android-app/`)
 
-1. Download **`PixelPhotoNAS-v1.2.0-Pixel1to5-Signed.apk`** from the **GitHub Actions → Build Pixel Photo NAS APK** artifact (or build locally with `./gradlew assembleRelease`).
+1. Download **`PixelPhotoNAS-v1.0.0-Pixel1to5-Signed.apk`** (or the latest merged version) from **GitHub Releases** or the **GitHub Actions** artifact.
 2. **On your Closet Pixel 1–5**: Open **Pixel Photo NAS**, grant **All Files Access**, enable **NAS Daemon Online**, and turn **Backup ON** for `PixelNAS` inside **Google Photos → Collections → On this device**.
 3. **On your Daily Android Phone**: Install the APK, tap **Auto-Find NAS** to pair over Wi-Fi, and tap **Pin Widget to Home Screen** (or configure **FolderSync / Round Sync** against `http://<pixel-ip>:8080/webdav/Incoming/StorageSaver/`).
 

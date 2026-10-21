@@ -16,6 +16,7 @@ android-app/local.properties
 *.aab
 *.jks
 *.keystore
+!android-app/keystore/pixelnas-release.p12
 
 # OS / Editor
 .DS_Store

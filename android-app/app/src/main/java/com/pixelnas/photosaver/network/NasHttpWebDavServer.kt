@@ -115,7 +115,7 @@ class NasHttpWebDavServer(
 
                     val root = JSONObject().apply {
                         put("app_name", "Pixel Photo NAS")
-                        put("version", "1.2.0")
+                        put("version", com.pixelnas.photosaver.BuildConfig.VERSION_NAME)
                         put("settings", configToJson(cfg, hw.displayName, hw.googlePhotosTier, hw.notes))
                         put("worker", JSONObject().apply {
                             put("watcher_running", wState.serviceRunning)

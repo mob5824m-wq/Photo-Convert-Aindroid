@@ -1,4 +1,4 @@
-name: Build Pixel Photo NAS APK & Run Tests
+name: Build Pixel Photo NAS APK & Auto-Release on Merge
 
 on:
   push:
@@ -6,17 +6,28 @@ on:
       - main
       - "arena/**"
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pixel-photo-nas-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test-server-engine:
-    name: Python NAS Server & Converter Suite
+    name: Python NAS Server & Versioning Suite
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -25,10 +36,19 @@ jobs:
       - run: pytest -v
 
   build-android-apk:
-    name: Build Signed Pixel 1–5 Android APK (API 26–34)
+    name: Build Signed Pixel 1–5 Android APK & Release
+    needs: test-server-engine
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch All Release Tags & Resolve Rollover Version (v1.0.0 -> v1.0.9 -> v1.1.0 -> v2.0.0)
+        id: ver
+        run: |
+          git fetch --tags --force
+          python3 -m server.versioning --github-output "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -41,33 +61,27 @@ jobs:
         with:
           gradle-version: "8.7"
 
-      - name: Sync Shared Web UI into APK Assets
+      - name: Sync Shared Web UI into APK Assets & Write VERSION
         run: |
+          echo "${{ steps.ver.outputs.version }}" > VERSION
           mkdir -p android-app/app/src/main/assets/webui
           cp webui/index.html webui/styles.css webui/app.js android-app/app/src/main/assets/webui/
 
-      - name: Generate V1+V2 Release Keystore for Direct Pixel Installation
+      - name: Verify Persistent V1+V2 Release Keystore
         run: |
-          keytool -genkeypair -v \
-            -keystore "$RUNNER_TEMP/pixelnas-release.keystore" \
-            -alias pixelnas \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass pixelnas2026 \
-            -keypass pixelnas2026 \
-            -dname "CN=PixelPhotoNAS, OU=MobileNAS, O=PhotoConvertAndroid, L=Kitchener, ST=ON, C=CA"
+          keytool -list \
+            -keystore android-app/keystore/pixelnas-release.p12 \
+            -storetype PKCS12 \
+            -storepass pixelnas2026
 
-      - name: Run Android Unit Tests & Build Signed Release + Debug APKs
+      - name: Run Android Unit Tests & Compile Signed Release + Debug APKs
         working-directory: android-app
-        env:
-          KEYSTORE_PATH: ${{ runner.temp }}/pixelnas-release.keystore
-          KEYSTORE_PASSWORD: pixelnas2026
-          KEY_ALIAS: pixelnas
-          KEY_PASSWORD: pixelnas2026
         run: |
           set -o pipefail
-          if ! gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon > "$RUNNER_TEMP/gradle.log" 2>&1; then
+          if ! gradle testDebugUnitTest assembleDebug assembleRelease \
+            -PappVersionName="${{ steps.ver.outputs.version }}" \
+            -PappVersionCode="${{ steps.ver.outputs.version_code }}" \
+            --no-daemon > "$RUNNER_TEMP/gradle.log" 2>&1; then
             cat "$RUNNER_TEMP/gradle.log"
             ERR_SUMMARY=$(grep -E "(^e: |FAILURE:|What went wrong:|^\* |> Task .* FAILED|Caused by:|Error:)" "$RUNNER_TEMP/gradle.log" | tail -n 25 | tr '\n' ' | ')
             echo "::error title=Gradle Failure::$ERR_SUMMARY"
@@ -75,13 +89,14 @@ jobs:
           fi
           cat "$RUNNER_TEMP/gradle.log" | tail -n 30
 
-      - name: Prepare Named Installable APKs
+      - name: Prepare Versioned Installable APKs
         run: |
           mkdir -p dist-apk
-          cp android-app/app/build/outputs/apk/release/app-release.apk dist-apk/PixelPhotoNAS-v1.2.0-Pixel1to5-Signed.apk
-          cp android-app/app/build/outputs/apk/debug/app-debug.apk dist-apk/PixelPhotoNAS-v1.2.0-Debug.apk
+          VER="${{ steps.ver.outputs.version }}"
+          cp android-app/app/build/outputs/apk/release/app-release.apk "dist-apk/PixelPhotoNAS-v${VER}-Pixel1to5-Signed.apk"
+          cp android-app/app/build/outputs/apk/debug/app-debug.apk "dist-apk/PixelPhotoNAS-v${VER}-Debug.apk"
           INFO=$(ls -lh dist-apk/ | tr '\n' ' ')
-          echo "::notice title=Built Signed APKs::$INFO"
+          echo "::notice title=Built Signed APKs (${{ steps.ver.outputs.tag }}, code ${{ steps.ver.outputs.version_code }})::$INFO"
 
       - name: Upload Installable Pixel 1–5 APK Artifact
         uses: actions/upload-artifact@v4
@@ -89,3 +104,35 @@ jobs:
           name: PixelPhotoNAS-Pixel1-to-Pixel5-APK
           path: dist-apk/*.apk
           retention-days: 90
+
+      - name: Tag Merge Release & Publish GitHub Release on Merge to main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          VER="${{ steps.ver.outputs.version }}"
+          CODE="${{ steps.ver.outputs.version_code }}"
+          PREV="${{ steps.ver.outputs.prev_tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if ! git diff --quiet VERSION; then
+            git add VERSION
+            git commit -m "chore(release): ${TAG} (versionCode ${CODE}) [skip ci]"
+            git push origin HEAD:main || git reset --hard HEAD~1
+          fi
+
+          git tag -a "${TAG}" -m "Pixel Photo NAS ${TAG} (versionCode ${CODE})"
+          git push origin "${TAG}"
+
+          NOTES="Automated merge build for **Pixel Photo NAS ${TAG}** (\`versionName = ${VER}\`, \`versionCode = ${CODE}\`)."
+          if [ -n "${PREV}" ]; then
+            NOTES="${NOTES} Bumped automatically from \`${PREV}\`."
+          fi
+
+          gh release create "${TAG}" dist-apk/*.apk \
+            --title "Pixel Photo NAS ${TAG}" \
+            --notes "${NOTES}" \
+            --generate-notes

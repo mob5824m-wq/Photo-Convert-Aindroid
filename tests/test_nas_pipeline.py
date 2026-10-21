@@ -12,7 +12,41 @@ from PIL import Image
 from server.converter import compute_target_dimensions, inspect_media_file
 from server.demo_media import generate_sample_batch
 from server.main import create_app
+from server.versioning import bump_rollover_version, resolve_next_from_tags
 from server.watcher import enforce_output_retention, iter_incoming_media, iter_output_media
+
+
+def test_auto_merge_rollover_versioning():
+    # First merge starts cleanly at v1.0.0 (versionCode = 1)
+    assert bump_rollover_version(None) == ("1.0.0", 1)
+    assert resolve_next_from_tags([]) == ("1.0.0", 1, None)
+
+    # Normal +0.0.1 increments
+    assert bump_rollover_version("1.0.0") == ("1.0.1", 2)
+    assert bump_rollover_version("1.0.8") == ("1.0.9", 10)
+
+    # Patch rollover: once it reaches 1.0.9, next is 1.1.0!
+    assert bump_rollover_version("1.0.9") == ("1.1.0", 11)
+    assert bump_rollover_version("1.1.9") == ("1.2.0", 21)
+
+    # Middle column rollover: once it reaches 1.9.9, next is 2.0.0!
+    assert bump_rollover_version("1.8.9") == ("1.9.0", 91)
+    assert bump_rollover_version("1.9.8") == ("1.9.9", 100)
+    assert bump_rollover_version("1.9.9") == ("2.0.0", 101)
+    assert bump_rollover_version("2.0.9") == ("2.1.0", 111)
+    assert bump_rollover_version("2.9.9") == ("3.0.0", 201)
+
+    # Full continuous 220-merge sequence verification
+    tags: list[str] = []
+    for expected_code in range(1, 221):
+        ver, code, _ = resolve_next_from_tags(tags)
+        assert code == expected_code
+        tags.append(f"v{ver}")
+    assert tags[0] == "v1.0.0"
+    assert tags[9] == "v1.0.9"
+    assert tags[10] == "v1.1.0"
+    assert tags[99] == "v1.9.9"
+    assert tags[100] == "v2.0.0"
 
 
 def _wait_until(predicate, timeout: float = 20.0, interval: float = 0.2) -> bool:
