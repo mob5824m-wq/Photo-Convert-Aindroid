@@ -113,8 +113,17 @@ class HouseholdSmbIntegrationTest {
         val outMp = (outDims!!.first.toDouble() * outDims.second.toDouble()) / 1_000_000.0
         assertTrue("Expected converted image <= 16.05 MP, got $outMp MP", outMp <= 16.05)
 
-        // Verify raw original (and temporary MomPhone staging folder) in Incoming/StorageSaver was cleaned up
-        val saverEntries = client.browseFolder(cfg, "Incoming\\StorageSaver")
-        assertTrue(saverEntries.none { it.name.contains("PXL_20261021_153000") || it.name == "MomPhone" })
+        // Wait briefly for worker's post-conversion SQLite commit + staging unlink & folder prune
+        val cleanupDeadline = System.currentTimeMillis() + 10_000L
+        var cleanedUp = false
+        while (System.currentTimeMillis() < cleanupDeadline) {
+            val saverEntries = client.browseFolder(cfg, "Incoming\\StorageSaver")
+            if (saverEntries.none { it.name.contains("PXL_20261021_153000") || it.name == "MomPhone" }) {
+                cleanedUp = true
+                break
+            }
+            Thread.sleep(150L)
+        }
+        assertTrue("Expected raw original & staging folder cleaned up after SQLite commit", cleanedUp)
     }
 }
